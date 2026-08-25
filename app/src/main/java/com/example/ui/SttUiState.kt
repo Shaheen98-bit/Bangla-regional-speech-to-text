@@ -15,8 +15,20 @@ data class SttUiState(
     val isRecording: Boolean = false,
     val rmsLevel: Float = 0f,
 
+    // Transcription Text Buffer
     val liveTranscript: String = "",
     val fullTranscript: String = "",
+
+    // UI View & Layout Controls
+    val isConfigCollapsed: Boolean = true,
+    val selectedTab: Int = 0, // 0 = Live Speech, 1 = Audio File
+
+    // Audio File Transcription State
+    val isTranscribingFile: Boolean = false,
+    val fileTranscriptionProgress: Float = 0f,
+    val fileTranscriptionStatus: String = "",
+    val selectedAudioFileName: String = "",
+    val fileTranscript: String = "",
 
     // Import progress
     val isImporting: Boolean = false,

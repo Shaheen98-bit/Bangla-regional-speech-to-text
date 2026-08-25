@@ -11,7 +11,6 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +33,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Assessment
+import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
@@ -42,10 +42,13 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.TabRowDefaults
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -66,6 +69,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.ui.components.AudioFileTranscriptionCard
 import com.example.ui.components.BenchmarkView
 import com.example.ui.components.DiagnosticDialog
 import com.example.ui.components.ImportProgressDialog
@@ -77,7 +81,6 @@ import com.example.ui.theme.ElegantDarkBorder
 import com.example.ui.theme.ElegantDarkSurfaceCard
 import com.example.ui.theme.ErrorContainer
 import com.example.ui.theme.ErrorRed
-import com.example.ui.theme.LavenderOnPrimary
 import com.example.ui.theme.LavenderPrimary
 import com.example.ui.theme.PurpleDarkCore
 import com.example.ui.theme.TextMuted
@@ -106,6 +109,13 @@ fun SttScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let { viewModel.importTokenizer(it) }
+    }
+
+    // SAF Picker for Audio File (MP3, WAV, M4A, AAC, OGG, FLAC, MP4, 3GP)
+    val audioFilePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { viewModel.transcribeAudioFile(it) }
     }
 
     // Audio Permission Launcher
@@ -152,14 +162,14 @@ fun SttScreen(
                         Text(
                             text = "বাংলা স্পিচ টু টেক্সট",
                             fontWeight = FontWeight.SemiBold,
-                            fontSize = 22.sp,
+                            fontSize = 21.sp,
                             letterSpacing = (-0.5).sp,
                             color = TextPrimary
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = "Kazalbrur Conformer 120M • 100% Offline",
-                            fontSize = 13.sp,
+                            fontSize = 12.5.sp,
                             fontWeight = FontWeight.Medium,
                             color = TextSecondary
                         )
@@ -208,141 +218,143 @@ fun SttScreen(
             )
         },
         bottomBar = {
-            // Bottom Controls matching Elegant Dark design footer
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(
-                                Color.Transparent,
-                                ElegantDarkBackground.copy(alpha = 0.9f),
-                                ElegantDarkBackground
+            if (uiState.selectedTab == 0) {
+                // Bottom Live Recording Controls
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    ElegantDarkBackground.copy(alpha = 0.9f),
+                                    ElegantDarkBackground
+                                )
                             )
                         )
-                    )
-                    .padding(horizontal = 16.dp, vertical = 18.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(horizontal = 16.dp, vertical = 14.dp)
                 ) {
-                    // Left: CLEAR Button
-                    Button(
-                        onClick = { viewModel.clearTranscript() },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("clear_button"),
-                        shape = CircleShape,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = ElegantDarkBorder,
-                            contentColor = TextPrimary
-                        )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "CLEAR",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            letterSpacing = 0.5.sp
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(16.dp))
-
-                    // Center: Large Circular Action Button
-                    val isActionEnabled = uiState.isBothReady
-                    Box(
-                        modifier = Modifier
-                            .size(76.dp)
-                            .scale(if (uiState.isRecording) pulseScale else 1f)
-                            .clip(CircleShape)
-                            .background(
-                                if (isActionEnabled) {
-                                    if (uiState.isRecording) ErrorContainer else LavenderPrimary
-                                } else {
-                                    LavenderPrimary.copy(alpha = 0.35f)
-                                }
+                        // Left: CLEAR Button
+                        Button(
+                            onClick = { viewModel.clearTranscript() },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(46.dp)
+                                .testTag("clear_button"),
+                            shape = CircleShape,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = ElegantDarkBorder,
+                                contentColor = TextPrimary
                             )
-                            .clickable(enabled = isActionEnabled) {
-                                if (!uiState.isRecording) {
+                        ) {
+                            Text(
+                                text = "CLEAR",
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                letterSpacing = 0.5.sp
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        // Center: Large Circular Action Button
+                        val isActionEnabled = uiState.isBothReady
+                        Box(
+                            modifier = Modifier
+                                .size(72.dp)
+                                .scale(if (uiState.isRecording) pulseScale else 1f)
+                                .clip(CircleShape)
+                                .background(
+                                    if (isActionEnabled) {
+                                        if (uiState.isRecording) ErrorContainer else LavenderPrimary
+                                    } else {
+                                        LavenderPrimary.copy(alpha = 0.35f)
+                                    }
+                                )
+                                .clickable(enabled = isActionEnabled) {
+                                    if (!uiState.isRecording) {
+                                        val permission = Manifest.permission.RECORD_AUDIO
+                                        if (ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED) {
+                                            viewModel.startRecording()
+                                        } else {
+                                            permissionLauncher.launch(permission)
+                                        }
+                                    } else {
+                                        viewModel.stopRecording()
+                                    }
+                                }
+                                .testTag(if (uiState.isRecording) "stop_recording_button" else "start_recording_button"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            // Inner Dark Circle
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (uiState.isRecording) Color(0xFF601410) else PurpleDarkCore
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (uiState.isRecording) {
+                                    Icon(
+                                        imageVector = Icons.Default.Stop,
+                                        contentDescription = "Stop Recording",
+                                        tint = ErrorRed,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Mic,
+                                        contentDescription = "Start Recording",
+                                        tint = LavenderPrimary,
+                                        modifier = Modifier.size(19.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        // Right: STOP / START Pill Button
+                        Button(
+                            onClick = {
+                                if (uiState.isRecording) {
+                                    viewModel.stopRecording()
+                                } else if (uiState.isBothReady) {
                                     val permission = Manifest.permission.RECORD_AUDIO
                                     if (ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED) {
                                         viewModel.startRecording()
                                     } else {
                                         permissionLauncher.launch(permission)
                                     }
-                                } else {
-                                    viewModel.stopRecording()
                                 }
-                            }
-                            .testTag(if (uiState.isRecording) "stop_recording_button" else "start_recording_button"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        // Inner Dark Circle
-                        Box(
+                            },
+                            enabled = uiState.isBothReady,
                             modifier = Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (uiState.isRecording) Color(0xFF601410) else PurpleDarkCore
-                                ),
-                            contentAlignment = Alignment.Center
+                                .weight(1f)
+                                .height(46.dp)
+                                .testTag("secondary_action_button"),
+                            shape = CircleShape,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (uiState.isRecording) ErrorContainer else ElegantDarkBorder,
+                                contentColor = if (uiState.isRecording) Color.White else TextPrimary,
+                                disabledContainerColor = ElegantDarkBorder.copy(alpha = 0.5f),
+                                disabledContentColor = TextMuted.copy(alpha = 0.5f)
+                            )
                         ) {
-                            if (uiState.isRecording) {
-                                Icon(
-                                    imageVector = Icons.Default.Stop,
-                                    contentDescription = "Stop Recording",
-                                    tint = ErrorRed,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.Mic,
-                                    contentDescription = "Start Recording",
-                                    tint = LavenderPrimary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
+                            Text(
+                                text = if (uiState.isRecording) "STOP" else "RECORD",
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                letterSpacing = 0.5.sp
+                            )
                         }
-                    }
-
-                    Spacer(modifier = Modifier.width(16.dp))
-
-                    // Right: STOP / START Pill Button
-                    Button(
-                        onClick = {
-                            if (uiState.isRecording) {
-                                viewModel.stopRecording()
-                            } else if (uiState.isBothReady) {
-                                val permission = Manifest.permission.RECORD_AUDIO
-                                if (ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED) {
-                                    viewModel.startRecording()
-                                } else {
-                                    permissionLauncher.launch(permission)
-                                }
-                            }
-                        },
-                        enabled = uiState.isBothReady,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("secondary_action_button"),
-                        shape = CircleShape,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (uiState.isRecording) ErrorContainer else ElegantDarkBorder,
-                            contentColor = if (uiState.isRecording) Color.White else TextPrimary,
-                            disabledContainerColor = ElegantDarkBorder.copy(alpha = 0.5f),
-                            disabledContentColor = TextMuted.copy(alpha = 0.5f)
-                        )
-                    ) {
-                        Text(
-                            text = if (uiState.isRecording) "STOP" else "RECORD",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            letterSpacing = 0.5.sp
-                        )
                     }
                 }
             }
@@ -354,11 +366,12 @@ fun SttScreen(
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp)
                 .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Model and Tokenizer Import / Management Section
+            // 1. Compact Collapsed/Expandable Model and Tokenizer Section
             ModelImportSection(
                 uiState = uiState,
+                onToggleCollapse = { viewModel.toggleConfigCollapsed() },
                 onImportModelClick = {
                     try {
                         modelPickerLauncher.launch(arrayOf("*/*"))
@@ -377,17 +390,80 @@ fun SttScreen(
                 onRemoveTokenizerClick = { viewModel.removeTokenizer() }
             )
 
-            // Waveform Audio Visualizer
-            WaveformView(
-                isRecording = uiState.isRecording,
-                rmsLevel = uiState.rmsLevel
-            )
+            // 2. Navigation Tabs for Live Transcription vs Audio File Transcription
+            TabRow(
+                selectedTabIndex = uiState.selectedTab,
+                containerColor = ElegantDarkSurfaceCard,
+                contentColor = LavenderPrimary,
+                indicator = { tabPositions ->
+                    TabRowDefaults.SecondaryIndicator(
+                        Modifier.tabIndicatorOffset(tabPositions[uiState.selectedTab]),
+                        color = LavenderPrimary
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+            ) {
+                Tab(
+                    selected = uiState.selectedTab == 0,
+                    onClick = { viewModel.setSelectedTab(0) },
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("লাইভ স্পিচ", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                )
+                Tab(
+                    selected = uiState.selectedTab == 1,
+                    onClick = { viewModel.setSelectedTab(1) },
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.AudioFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("অডিও ফাইল", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                )
+            }
 
-            // Large Transcription Display Card
-            TranscriptionCard(
-                uiState = uiState,
-                onClearClick = { viewModel.clearTranscript() }
-            )
+            // 3. Tab Content
+            if (uiState.selectedTab == 0) {
+                // Live Audio Waveform Visualizer
+                WaveformView(
+                    isRecording = uiState.isRecording,
+                    rmsLevel = uiState.rmsLevel
+                )
+
+                // Large Live Transcription Display Card with Copy, Share, Save, Clear
+                TranscriptionCard(
+                    uiState = uiState,
+                    onClearClick = { viewModel.clearTranscript() }
+                )
+            } else {
+                // Audio File Transcription Card with File Picker, Progress, Copy, Share, Save, Clear
+                AudioFileTranscriptionCard(
+                    uiState = uiState,
+                    onSelectFileClick = {
+                        try {
+                            audioFilePickerLauncher.launch(
+                                arrayOf(
+                                    "audio/*",
+                                    "video/mp4",
+                                    "video/3gpp",
+                                    "application/ogg"
+                                )
+                            )
+                        } catch (e: Exception) {
+                            viewModel.showUserMessage("File picker error: ${e.localizedMessage}")
+                        }
+                    },
+                    onCancelClick = { viewModel.cancelFileTranscription() },
+                    onClearClick = { viewModel.clearFileTranscript() }
+                )
+            }
 
             // Benchmark & Performance Telemetry
             BenchmarkView(uiState = uiState)

@@ -2,9 +2,11 @@ package com.example.ui
 
 import android.app.Application
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.audio.AudioFileDecoder
 import com.example.audio.AudioRecorderManager
 import com.example.dsp.MelSpectrogramPreprocessor
 import com.example.engine.CtcDecoder
@@ -12,6 +14,7 @@ import com.example.engine.OnnxAsrEngine
 import com.example.model.ModelManager
 import com.example.tokenizer.SentencePieceTokenizer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -43,6 +46,8 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
 
     private val isInferring = AtomicBoolean(false)
     private val chunkCounter = AtomicInteger(0)
+    private var lastCommittedSentence: String = ""
+    private var fileTranscriptionJob: Job? = null
 
     init {
         checkPersistedFilesAndInitialize()
@@ -256,9 +261,10 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             chunkCounter.set(0)
+            lastCommittedSentence = ""
             val started = audioRecorder.startRecording(viewModelScope)
             withContext(Dispatchers.Main) {
-                _uiState.update { it.copy(isRecording = started) }
+                _uiState.update { it.copy(isRecording = started, liveTranscript = "") }
             }
         }
         return true
@@ -268,7 +274,8 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
         audioRecorder.stopRecording()
         _uiState.update { current ->
             val finalLive = current.liveTranscript.trim()
-            val newFull = if (finalLive.isNotEmpty()) {
+            val newFull = if (finalLive.isNotEmpty() && finalLive != lastCommittedSentence) {
+                lastCommittedSentence = finalLive
                 if (current.fullTranscript.isEmpty()) finalLive
                 else "${current.fullTranscript}\n$finalLive"
             } else {
@@ -284,10 +291,169 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearTranscript() {
+        lastCommittedSentence = ""
         _uiState.update {
             it.copy(
                 liveTranscript = "",
                 fullTranscript = ""
+            )
+        }
+    }
+
+    fun clearFileTranscript() {
+        _uiState.update {
+            it.copy(
+                fileTranscript = "",
+                selectedAudioFileName = "",
+                fileTranscriptionStatus = ""
+            )
+        }
+    }
+
+    fun toggleConfigCollapsed() {
+        _uiState.update { it.copy(isConfigCollapsed = !it.isConfigCollapsed) }
+    }
+
+    fun setSelectedTab(tab: Int) {
+        _uiState.update { it.copy(selectedTab = tab) }
+    }
+
+    fun transcribeAudioFile(uri: Uri) {
+        if (!_uiState.value.isBothReady) {
+            _uiState.update { it.copy(userMessage = "Please import both Model and Tokenizer first.") }
+            return
+        }
+
+        fileTranscriptionJob?.cancel()
+        fileTranscriptionJob = viewModelScope.launch(Dispatchers.IO) {
+            val appContext = getApplication<Application>().applicationContext
+            var fileName = "audio_file"
+
+            try {
+                appContext.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIndex >= 0 && cursor.moveToFirst()) {
+                        fileName = cursor.getString(nameIndex) ?: "audio_file"
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not resolve audio file name", e)
+            }
+
+            _uiState.update {
+                it.copy(
+                    isTranscribingFile = true,
+                    selectedAudioFileName = fileName,
+                    fileTranscriptionProgress = 0.05f,
+                    fileTranscriptionStatus = "অডিও ফাইল ডিকোড করা হচ্ছে...",
+                    userMessage = null
+                )
+            }
+
+            if (!onnxEngine.isLoaded) {
+                loadModelInternal()
+            }
+            if (tokenizer == null) {
+                loadTokenizerInternal()
+            }
+
+            try {
+                // 1. Decode Audio to 16 kHz Mono PCM
+                val decodedAudio = AudioFileDecoder.decodeAudioUri(appContext, uri) { progress ->
+                    _uiState.update {
+                        it.copy(
+                            fileTranscriptionProgress = progress,
+                            fileTranscriptionStatus = "ডিকোড হচ্ছে... (${(progress * 100).toInt()}%)"
+                        )
+                    }
+                }
+
+                _uiState.update {
+                    it.copy(
+                        fileTranscriptionProgress = 0.55f,
+                        fileTranscriptionStatus = "মেল স্পেকট্রোগ্রাম ও অন-ডিভাইস STT চালানো হচ্ছে..."
+                    )
+                }
+
+                // 2. Transcribe in chunks (e.g. 5-8 seconds each) to avoid OOM and provide incremental progress
+                val samples = decodedAudio.samples
+                val sampleRate = 16000
+                val chunkSamples = sampleRate * 6 // 6s per chunk
+                val stepSamples = sampleRate * 5  // 1s overlap
+                val accumulatedSentences = mutableListOf<String>()
+
+                var offset = 0
+                val totalSamples = samples.size
+
+                while (offset < totalSamples) {
+                    val end = (offset + chunkSamples).coerceAtMost(totalSamples)
+                    val chunk = samples.copyOfRange(offset, end)
+
+                    val prepRes = preprocessor.process(chunk)
+                    if (prepRes.numFrames > 0 && !prepRes.isSilence) {
+                        val inferRes = onnxEngine.runInference(prepRes)
+                        if (inferRes.isSuccess) {
+                            val inference = inferRes.getOrThrow()
+                            val decodeRes = ctcDecoder.decode(
+                                logprobs = inference.logprobs,
+                                numFrames = inference.numFrames,
+                                numClasses = inference.numClasses,
+                                tokenizer = tokenizer
+                            )
+                            val cleanText = decodeRes.text.trim()
+                            if (cleanText.isNotEmpty()) {
+                                // Avoid duplicate consecutive lines
+                                if (accumulatedSentences.isEmpty() || accumulatedSentences.last() != cleanText) {
+                                    accumulatedSentences.add(cleanText)
+                                }
+                            }
+                        }
+                    }
+
+                    offset += stepSamples
+                    val currentProgress = 0.55f + ((offset.toFloat() / totalSamples.toFloat()) * 0.45f).coerceAtMost(0.42f)
+                    val currentText = accumulatedSentences.joinToString("\n")
+
+                    _uiState.update {
+                        it.copy(
+                            fileTranscriptionProgress = currentProgress.coerceIn(0f, 0.98f),
+                            fileTranscript = currentText,
+                            fileTranscriptionStatus = "প্রসেসিং হচ্ছে... (${(currentProgress * 100).toInt()}%)"
+                        )
+                    }
+                }
+
+                val finalFullText = accumulatedSentences.joinToString("\n")
+
+                _uiState.update {
+                    it.copy(
+                        isTranscribingFile = false,
+                        fileTranscriptionProgress = 1.0f,
+                        fileTranscript = if (finalFullText.isNotEmpty()) finalFullText else "কোনো স্পষ্ট বাংলা কথা শনাক্ত করা যায়নি।",
+                        fileTranscriptionStatus = "ট্রান্সক্রিপশন সম্পন্ন (${(decodedAudio.durationMs / 1000)}s)"
+                    )
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Audio file transcription failed", e)
+                _uiState.update {
+                    it.copy(
+                        isTranscribingFile = false,
+                        fileTranscriptionStatus = "ব্যর্থ হয়েছে: ${e.localizedMessage}",
+                        userMessage = "অডিও ট্রান্সক্রিপশন ব্যর্থ: ${e.localizedMessage}"
+                    )
+                }
+            }
+        }
+    }
+
+    fun cancelFileTranscription() {
+        fileTranscriptionJob?.cancel()
+        fileTranscriptionJob = null
+        _uiState.update {
+            it.copy(
+                isTranscribingFile = false,
+                fileTranscriptionStatus = "বাতিল করা হয়েছে"
             )
         }
     }
@@ -372,9 +538,10 @@ decoded text: "$decodedText"
                 // 5. Update UI State
                 _uiState.update { current ->
                     if (isEndOfUtterance) {
-                        // Sentence completed: append to full transcript and clear live
+                        // Sentence completed: append to full transcript and clear live (preventing duplicate appends)
                         val cleanDecoded = decodedText.trim()
-                        val updatedFull = if (cleanDecoded.isNotEmpty()) {
+                        val updatedFull = if (cleanDecoded.isNotEmpty() && cleanDecoded != lastCommittedSentence) {
+                            lastCommittedSentence = cleanDecoded
                             if (current.fullTranscript.isEmpty()) cleanDecoded
                             else "${current.fullTranscript}\n$cleanDecoded"
                         } else {
