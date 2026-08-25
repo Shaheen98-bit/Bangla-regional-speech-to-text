@@ -11,6 +11,7 @@ import com.example.audio.AudioRecorderManager
 import com.example.dsp.MelSpectrogramPreprocessor
 import com.example.engine.CtcDecoder
 import com.example.engine.OnnxAsrEngine
+import com.example.engine.StreamingTranscriptAccumulator
 import com.example.model.ModelManager
 import com.example.tokenizer.SentencePieceTokenizer
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +36,9 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     private val ctcDecoder = CtcDecoder(blankIndex = 128)
     private var tokenizer: SentencePieceTokenizer? = null
 
+    // Streaming Accumulator for clean, duplicate-free, append-only transcript management
+    val accumulator = StreamingTranscriptAccumulator()
+
     private val audioRecorder = AudioRecorderManager(
         sampleRate = 16000,
         maxUtteranceDurationMs = 12000,
@@ -46,7 +50,6 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
 
     private val isInferring = AtomicBoolean(false)
     private val chunkCounter = AtomicInteger(0)
-    private var lastCommittedSentence: String = ""
     private var fileTranscriptionJob: Job? = null
 
     init {
@@ -232,8 +235,22 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun setupAudioListener() {
         audioRecorder.setListener(object : AudioRecorderManager.AudioListener {
-            override fun onAudioChunkAvailable(audioWindow: ShortArray, totalDurationMs: Long, isEndOfUtterance: Boolean) {
-                processAudioWindow(audioWindow, totalDurationMs, isEndOfUtterance)
+            override fun onAudioChunkAvailable(
+                audioWindow: ShortArray,
+                totalDurationMs: Long,
+                audioFrameStart: Long,
+                audioFrameEnd: Long,
+                vadState: String,
+                isEndOfUtterance: Boolean
+            ) {
+                processAudioWindow(
+                    audioWindow = audioWindow,
+                    durationMs = totalDurationMs,
+                    audioFrameStart = audioFrameStart,
+                    audioFrameEnd = audioFrameEnd,
+                    vadState = vadState,
+                    isEndOfUtterance = isEndOfUtterance
+                )
             }
 
             override fun onAmplitudeChanged(rmsNormalized: Float) {
@@ -261,10 +278,16 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             chunkCounter.set(0)
-            lastCommittedSentence = ""
             val started = audioRecorder.startRecording(viewModelScope)
             withContext(Dispatchers.Main) {
-                _uiState.update { it.copy(isRecording = started, liveTranscript = "") }
+                _uiState.update {
+                    it.copy(
+                        isRecording = started,
+                        currentPartial = "",
+                        liveTranscript = "",
+                        vadState = AudioRecorderManager.VAD_SILENCE
+                    )
+                }
             }
         }
         return true
@@ -272,30 +295,46 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopRecording() {
         audioRecorder.stopRecording()
+        // Flush remaining stable partial text cleanly to fullTranscript
+        val flushedText = accumulator.flushOnStop()
+
+        if (flushedText.isNotEmpty()) {
+            Log.i(TAG, """
+--- ASR PIPELINE LOG ---
+audioFrameStart: ${_uiState.value.audioFrameStart}
+audioFrameEnd: ${_uiState.value.audioFrameEnd}
+VAD state: RECORDING_STOP_FLUSH
+decoded text: "$flushedText"
+stable prefix: ""
+committed text: "$flushedText"
+fullTranscript length: ${accumulator.fullTranscript.length}
+------------------------
+            """.trimIndent())
+        }
+
         _uiState.update { current ->
-            val finalLive = current.liveTranscript.trim()
-            val newFull = if (finalLive.isNotEmpty() && finalLive != lastCommittedSentence) {
-                lastCommittedSentence = finalLive
-                if (current.fullTranscript.isEmpty()) finalLive
-                else "${current.fullTranscript}\n$finalLive"
-            } else {
-                current.fullTranscript
-            }
             current.copy(
                 isRecording = false,
                 rmsLevel = 0f,
+                currentPartial = "",
                 liveTranscript = "",
-                fullTranscript = newFull
+                stablePrefix = "",
+                fullTranscript = accumulator.fullTranscript,
+                lastCommittedText = flushedText.ifEmpty { current.lastCommittedText },
+                vadState = "STOPPED"
             )
         }
     }
 
     fun clearTranscript() {
-        lastCommittedSentence = ""
+        accumulator.clear()
         _uiState.update {
             it.copy(
+                currentPartial = "",
                 liveTranscript = "",
-                fullTranscript = ""
+                stablePrefix = "",
+                fullTranscript = "",
+                lastCommittedText = ""
             )
         }
     }
@@ -375,12 +414,12 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
 
-                // 2. Transcribe in chunks (e.g. 5-8 seconds each) to avoid OOM and provide incremental progress
+                // 2. Transcribe using file accumulator
+                val fileAccumulator = StreamingTranscriptAccumulator()
                 val samples = decodedAudio.samples
                 val sampleRate = 16000
                 val chunkSamples = sampleRate * 6 // 6s per chunk
                 val stepSamples = sampleRate * 5  // 1s overlap
-                val accumulatedSentences = mutableListOf<String>()
 
                 var offset = 0
                 val totalSamples = samples.size
@@ -402,28 +441,24 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                             )
                             val cleanText = decodeRes.text.trim()
                             if (cleanText.isNotEmpty()) {
-                                // Avoid duplicate consecutive lines
-                                if (accumulatedSentences.isEmpty() || accumulatedSentences.last() != cleanText) {
-                                    accumulatedSentences.add(cleanText)
-                                }
+                                fileAccumulator.finalizeUtterance(cleanText)
                             }
                         }
                     }
 
                     offset += stepSamples
                     val currentProgress = 0.55f + ((offset.toFloat() / totalSamples.toFloat()) * 0.45f).coerceAtMost(0.42f)
-                    val currentText = accumulatedSentences.joinToString("\n")
 
                     _uiState.update {
                         it.copy(
                             fileTranscriptionProgress = currentProgress.coerceIn(0f, 0.98f),
-                            fileTranscript = currentText,
+                            fileTranscript = fileAccumulator.fullTranscript,
                             fileTranscriptionStatus = "প্রসেসিং হচ্ছে... (${(currentProgress * 100).toInt()}%)"
                         )
                     }
                 }
 
-                val finalFullText = accumulatedSentences.joinToString("\n")
+                val finalFullText = fileAccumulator.fullTranscript
 
                 _uiState.update {
                     it.copy(
@@ -458,7 +493,14 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun processAudioWindow(audioWindow: ShortArray, durationMs: Long, isEndOfUtterance: Boolean) {
+    private fun processAudioWindow(
+        audioWindow: ShortArray,
+        durationMs: Long,
+        audioFrameStart: Long,
+        audioFrameEnd: Long,
+        vadState: String,
+        isEndOfUtterance: Boolean
+    ) {
         // Conflated execution: prevent queuing if previous inference is still in progress
         if (!isInferring.compareAndSet(false, true)) {
             return
@@ -479,11 +521,14 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                // If chunk is pure silence (e.g. background room noise before speech), skip model inference
+                // If chunk is silence, update telemetry and skip ONNX
                 if (preprocessResult.isSilence) {
                     _uiState.update { current ->
                         current.copy(
                             audioWindowMs = durationMs,
+                            audioFrameStart = audioFrameStart,
+                            audioFrameEnd = audioFrameEnd,
+                            vadState = vadState,
                             featureShape = "[1, 80, ${preprocessResult.numFrames}]"
                         )
                     }
@@ -513,43 +558,35 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                 val rtf = if (durationMs > 0) (totalTime.toFloat() / durationMs.toFloat()) else 0f
                 val decodedText = decodeResult.text
 
-                // 4. Detailed STT Debug Logging (Required by specification)
-                val rawStr = if (decodeResult.rawArgmax.size > 20) {
-                    decodeResult.rawArgmax.take(20).joinToString(", ") + "... (${decodeResult.rawArgmax.size} frames)"
-                } else {
-                    decodeResult.rawArgmax.joinToString(", ")
-                }
+                if (isEndOfUtterance) {
+                    // Utterance boundary reached: commit only the new/stable sentence once
+                    val committedText = accumulator.finalizeUtterance(decodedText)
+                    val stablePrefix = accumulator.stablePrefix
+                    val fullTranscriptLen = accumulator.fullTranscript.length
 
-                Log.d(TAG, """
---- STT DEBUG ---
-chunk number: $currentChunkNum
-audio samples: ${audioWindow.size} (${durationMs}ms)
-mel shape: [1, ${preprocessResult.nMels}, ${preprocessResult.numFrames}]
-length: ${preprocessResult.numFrames}
-ONNX output shape: [1, ${inference.numFrames}, ${inference.numClasses}]
-argmax IDs: [$rawStr]
-blank ID: ${ctcDecoder.blankIndex}
-collapsed IDs: ${decodeResult.collapsedIds}
-tokenizer pieces: ${decodeResult.pieces}
+                    // Log detailed required info
+                    Log.i(TAG, """
+--- ASR PIPELINE LOG ---
+audioFrameStart: $audioFrameStart
+audioFrameEnd: $audioFrameEnd
+VAD state: $vadState
 decoded text: "$decodedText"
----------------
-                """.trimIndent())
+stable prefix: "$stablePrefix"
+committed text: "$committedText"
+fullTranscript length: $fullTranscriptLen
+------------------------
+                    """.trimIndent())
 
-                // 5. Update UI State
-                _uiState.update { current ->
-                    if (isEndOfUtterance) {
-                        // Sentence completed: append to full transcript and clear live (preventing duplicate appends)
-                        val cleanDecoded = decodedText.trim()
-                        val updatedFull = if (cleanDecoded.isNotEmpty() && cleanDecoded != lastCommittedSentence) {
-                            lastCommittedSentence = cleanDecoded
-                            if (current.fullTranscript.isEmpty()) cleanDecoded
-                            else "${current.fullTranscript}\n$cleanDecoded"
-                        } else {
-                            current.fullTranscript
-                        }
+                    _uiState.update { current ->
                         current.copy(
+                            fullTranscript = accumulator.fullTranscript,
+                            currentPartial = "",
                             liveTranscript = "",
-                            fullTranscript = updatedFull,
+                            stablePrefix = "",
+                            lastCommittedText = committedText.ifEmpty { current.lastCommittedText },
+                            audioFrameStart = audioFrameStart,
+                            audioFrameEnd = audioFrameEnd,
+                            vadState = vadState,
                             audioWindowMs = durationMs,
                             featureShape = "[1, 80, ${preprocessResult.numFrames}]",
                             preprocessTimeMs = prepTime,
@@ -558,10 +595,35 @@ decoded text: "$decodedText"
                             totalLatencyMs = totalTime,
                             rtf = (rtf * 1000).toInt() / 1000f
                         )
-                    } else {
-                        // Live updating during speech
+                    }
+                } else {
+                    // Intermediate streaming hypothesis: update partial and stable prefix
+                    val currentPartial = accumulator.updatePartial(decodedText)
+                    val stablePrefix = accumulator.stablePrefix
+                    val fullTranscriptLen = accumulator.fullTranscript.length
+
+                    // Log detailed required info
+                    Log.d(TAG, """
+--- ASR PIPELINE LOG ---
+audioFrameStart: $audioFrameStart
+audioFrameEnd: $audioFrameEnd
+VAD state: $vadState
+decoded text: "$decodedText"
+stable prefix: "$stablePrefix"
+committed text: ""
+fullTranscript length: $fullTranscriptLen
+------------------------
+                    """.trimIndent())
+
+                    _uiState.update { current ->
                         current.copy(
-                            liveTranscript = decodedText,
+                            fullTranscript = accumulator.fullTranscript, // NEVER overwritten or cleared by partial
+                            currentPartial = currentPartial,
+                            liveTranscript = currentPartial,
+                            stablePrefix = stablePrefix,
+                            audioFrameStart = audioFrameStart,
+                            audioFrameEnd = audioFrameEnd,
+                            vadState = vadState,
                             audioWindowMs = durationMs,
                             featureShape = "[1, 80, ${preprocessResult.numFrames}]",
                             preprocessTimeMs = prepTime,

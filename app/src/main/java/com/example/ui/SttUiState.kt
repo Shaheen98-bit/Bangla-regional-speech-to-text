@@ -1,23 +1,38 @@
 package com.example.ui
 
+/**
+ * Immutable UI State representing STT session status, accumulator buffers, and telemetry.
+ */
 data class SttUiState(
+    // Model and Tokenizer State
     val isModelImported: Boolean = false,
-    val modelSizeBytes: Long = 0L,
-    val modelSizeFormatted: String = "0 MB",
-    val isModelLoaded: Boolean = false,
-
     val isTokenizerImported: Boolean = false,
-    val tokenizerSizeBytes: Long = 0L,
-    val tokenizerSizeFormatted: String = "0 KB",
-    val tokenizerVocabSize: Int = 0,
+    val isModelLoaded: Boolean = false,
     val isTokenizerLoaded: Boolean = false,
+    val modelSizeBytes: Long = 0L,
+    val modelSizeFormatted: String = "",
+    val tokenizerSizeBytes: Long = 0L,
+    val tokenizerSizeFormatted: String = "",
+    val tokenizerVocabSize: Int = 0,
+    val blankIndex: Int = 128,
 
+    // Runtime State
     val isRecording: Boolean = false,
     val rmsLevel: Float = 0f,
 
-    // Transcription Text Buffer
-    val liveTranscript: String = "",
+    // Transcription Text Buffers
+    // fullTranscript is a permanent append-only finalized transcript (NEVER overwritten by partial)
     val fullTranscript: String = "",
+    // currentPartial represents the intermediate hypothesis for the active in-flight utterance
+    val currentPartial: String = "",
+    val liveTranscript: String = "", // Mirror for currentPartial for UI/backward compatibility
+    val stablePrefix: String = "",
+    val lastCommittedText: String = "",
+
+    // Frame and VAD Telemetry
+    val audioFrameStart: Long = 0L,
+    val audioFrameEnd: Long = 0L,
+    val vadState: String = "IDLE",
 
     // UI View & Layout Controls
     val isConfigCollapsed: Boolean = true,
@@ -36,23 +51,22 @@ data class SttUiState(
     val importProgressFraction: Float = 0f,
     val importStatusText: String = "",
 
-    // Performance & Benchmark Metrics
+    // Diagnostics Modal
+    val showDiagnosticDialog: Boolean = false,
+    val diagnosticLogs: List<String> = emptyList(),
+    val isDiagnosticRunning: Boolean = false,
+    val diagnosticSuccess: Boolean? = null,
+
+    // Performance & Benchmark Telemetry
     val audioWindowMs: Long = 0L,
-    val featureShape: String = "[1, 80, 0]",
+    val featureShape: String = "",
     val preprocessTimeMs: Long = 0L,
     val inferenceTimeMs: Long = 0L,
     val ctcTimeMs: Long = 0L,
     val totalLatencyMs: Long = 0L,
-    val rtf: Float = 0.0f,
-    val blankIndex: Int = 128,
+    val rtf: Float = 0f,
 
-    // Diagnostic Mode
-    val isDiagnosticRunning: Boolean = false,
-    val diagnosticLogs: List<String> = emptyList(),
-    val diagnosticSuccess: Boolean? = null,
-    val showDiagnosticDialog: Boolean = false,
-
-    // Error / Notification
+    // User Feedback
     val userMessage: String? = null
 ) {
     val isBothReady: Boolean

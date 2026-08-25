@@ -14,7 +14,8 @@ import kotlin.math.sqrt
 
 /**
  * Manages 16 kHz Mono 16-bit PCM microphone capture using AudioRecord.
- * Collects speech utterances and provides real-time audio windows for ASR inference.
+ * Collects speech utterances and provides real-time audio windows for ASR inference
+ * with sample-accurate frame tracking and VAD boundary detection.
  */
 class AudioRecorderManager(
     val sampleRate: Int = 16000,
@@ -23,8 +24,12 @@ class AudioRecorderManager(
 ) {
     companion object {
         private const val TAG = "AudioRecorderManager"
+        const val VAD_SILENCE = "SILENCE"
+        const val VAD_SPEECH_ACTIVE = "SPEECH_ACTIVE"
+        const val VAD_PAUSE_BOUNDARY = "PAUSE_BOUNDARY"
+
         private const val SILENCE_RMS_THRESHOLD = 0.003f
-        private const val PAUSE_COMMIT_DURATION_MS = 1400L // 1.4s pause triggers utterance commit
+        private const val PAUSE_COMMIT_DURATION_MS = 1300L // 1.3s pause triggers utterance commit
     }
 
     private var audioRecord: AudioRecord? = null
@@ -41,8 +46,19 @@ class AudioRecorderManager(
     private var silentSamplesCount = 0
     private var speechDetectedInUtterance = false
 
+    // Absolute frame counters across the entire recording session
+    private var totalSessionSamples: Long = 0L
+    private var utteranceStartFrame: Long = 0L
+
     interface AudioListener {
-        fun onAudioChunkAvailable(audioWindow: ShortArray, totalDurationMs: Long, isEndOfUtterance: Boolean)
+        fun onAudioChunkAvailable(
+            audioWindow: ShortArray,
+            totalDurationMs: Long,
+            audioFrameStart: Long,
+            audioFrameEnd: Long,
+            vadState: String,
+            isEndOfUtterance: Boolean
+        )
         fun onAmplitudeChanged(rmsNormalized: Float)
         fun onError(message: String)
     }
@@ -72,7 +88,6 @@ class AudioRecorderManager(
 
         var record: AudioRecord? = null
 
-        // Try VOICE_RECOGNITION first, fallback to MIC
         val sourcesToTry = intArrayOf(
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
             MediaRecorder.AudioSource.MIC
@@ -107,6 +122,7 @@ class AudioRecorderManager(
 
         audioRecord = record
         isRecording = true
+        totalSessionSamples = 0L
         resetUtteranceState()
 
         recordingJob = coroutineScope.launch(Dispatchers.IO) {
@@ -126,6 +142,7 @@ class AudioRecorderManager(
     }
 
     private fun resetUtteranceState() {
+        utteranceStartFrame = totalSessionSamples
         currentUtteranceSamples = 0
         samplesSinceLastEmit = 0
         silentSamplesCount = 0
@@ -133,6 +150,8 @@ class AudioRecorderManager(
     }
 
     private fun processIncomingPcm(samples: ShortArray, count: Int) {
+        totalSessionSamples += count
+
         // Calculate RMS amplitude for UI visualization & VAD
         var sumSquares = 0.0
         for (i in 0 until count) {
@@ -152,12 +171,12 @@ class AudioRecorderManager(
             silentSamplesCount += count
         }
 
-        // If we haven't detected speech yet in this utterance and buffer is silent,
-        // keep only the last ~0.3s as lead-in to avoid leading silence buildup
+        // If no speech detected yet, keep only lead-in window (~0.3s) to avoid leading silence buildup
         if (!speechDetectedInUtterance && currentUtteranceSamples > (sampleRate * 0.3)) {
             val leadIn = (sampleRate * 0.3).toInt()
             System.arraycopy(samples, 0, utteranceBuffer, 0, count.coerceAtMost(leadIn))
             currentUtteranceSamples = count.coerceAtMost(leadIn)
+            utteranceStartFrame = totalSessionSamples - currentUtteranceSamples
             return
         }
 
@@ -167,11 +186,11 @@ class AudioRecorderManager(
             System.arraycopy(samples, 0, utteranceBuffer, currentUtteranceSamples, count)
             currentUtteranceSamples += count
         } else {
-            // Buffer full: slide left by half to keep recent context
             val half = maxUtteranceSamples / 2
             System.arraycopy(utteranceBuffer, half, utteranceBuffer, 0, half)
             System.arraycopy(samples, 0, utteranceBuffer, half, count.coerceAtMost(maxUtteranceSamples - half))
             currentUtteranceSamples = half + count.coerceAtMost(maxUtteranceSamples - half)
+            utteranceStartFrame = totalSessionSamples - currentUtteranceSamples
         }
 
         samplesSinceLastEmit += count
@@ -180,11 +199,20 @@ class AudioRecorderManager(
         val pauseDurationMs = (silentSamplesCount * 1000L) / sampleRate
         val isPauseAfterSpeech = speechDetectedInUtterance && (pauseDurationMs >= PAUSE_COMMIT_DURATION_MS)
 
-        if (isPauseAfterSpeech && currentUtteranceSamples >= (sampleRate * 0.8)) {
-            // Emit final chunk of this utterance with isEndOfUtterance = true
+        if (isPauseAfterSpeech && currentUtteranceSamples >= (sampleRate * 0.6)) {
             val utteranceCopy = utteranceBuffer.copyOfRange(0, currentUtteranceSamples)
             val durationMs = (currentUtteranceSamples * 1000L) / sampleRate
-            listener?.onAudioChunkAvailable(utteranceCopy, durationMs, isEndOfUtterance = true)
+            val frameStart = utteranceStartFrame
+            val frameEnd = utteranceStartFrame + currentUtteranceSamples
+
+            listener?.onAudioChunkAvailable(
+                audioWindow = utteranceCopy,
+                totalDurationMs = durationMs,
+                audioFrameStart = frameStart,
+                audioFrameEnd = frameEnd,
+                vadState = VAD_PAUSE_BOUNDARY,
+                isEndOfUtterance = true
+            )
             resetUtteranceState()
             return
         }
@@ -194,7 +222,18 @@ class AudioRecorderManager(
         if (samplesSinceLastEmit >= stepSamplesCount && currentUtteranceSamples >= minSamplesForInference) {
             val utteranceCopy = utteranceBuffer.copyOfRange(0, currentUtteranceSamples)
             val durationMs = (currentUtteranceSamples * 1000L) / sampleRate
-            listener?.onAudioChunkAvailable(utteranceCopy, durationMs, isEndOfUtterance = false)
+            val frameStart = utteranceStartFrame
+            val frameEnd = utteranceStartFrame + currentUtteranceSamples
+            val vadState = if (isChunkSpeech) VAD_SPEECH_ACTIVE else VAD_SILENCE
+
+            listener?.onAudioChunkAvailable(
+                audioWindow = utteranceCopy,
+                totalDurationMs = durationMs,
+                audioFrameStart = frameStart,
+                audioFrameEnd = frameEnd,
+                vadState = vadState,
+                isEndOfUtterance = false
+            )
             samplesSinceLastEmit = 0
         }
     }
@@ -213,6 +252,21 @@ class AudioRecorderManager(
             audioRecord = null
         }
         listener?.onAmplitudeChanged(0f)
+
+        // If there was uncommitted speech, emit final chunk before closing
+        if (speechDetectedInUtterance && currentUtteranceSamples >= (sampleRate * 0.4)) {
+            val utteranceCopy = utteranceBuffer.copyOfRange(0, currentUtteranceSamples)
+            val durationMs = (currentUtteranceSamples * 1000L) / sampleRate
+            listener?.onAudioChunkAvailable(
+                audioWindow = utteranceCopy,
+                totalDurationMs = durationMs,
+                audioFrameStart = utteranceStartFrame,
+                audioFrameEnd = utteranceStartFrame + currentUtteranceSamples,
+                vadState = VAD_PAUSE_BOUNDARY,
+                isEndOfUtterance = true
+            )
+        }
+
         resetUtteranceState()
     }
 }
