@@ -1,0 +1,6 @@
+{
+  "name": "Kazalbrur Bangla STT",
+  "description": "100% offline on-device Bangla Speech-to-Text powered by Conformer 120M and ONNX Runtime.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
