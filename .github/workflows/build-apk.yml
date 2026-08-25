@@ -1,0 +1,62 @@
+name: Build Kazalbrur APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Setup Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Check Gradle
+        run: |
+          java -version
+          gradle --version
+
+      - name: Build Debug APK
+        run: |
+          gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Find APK
+        run: |
+          echo "APK files:"
+          find app/build/outputs -type f -name "*.apk" -print
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: Kazalbrur-Bangla-STT-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
