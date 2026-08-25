@@ -1,9 +1,12 @@
 package com.example
 
+import com.example.engine.AudioFileProcessor
 import com.example.engine.StreamingTranscriptAccumulator
+import com.example.engine.TranscriptSegment
 import com.example.ui.SttUiState
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -23,206 +26,285 @@ class StreamingPipelineTest {
     }
 
     /**
-     * 1. Repeated overlapping CTC chunks:
-     * Intermediate CTC chunks with slight spelling variations or repeats
-     * must update currentPartial without polluting or duplicating fullTranscript.
+     * 1. Partial result does not erase finalized text
      */
     @Test
-    fun testRepeatedOverlappingCtcChunks() {
-        // Progressive streaming chunks for the same utterance
-        accumulator.updatePartial("এটে থাহা")
-        accumulator.updatePartial("এটে থাহা পয়সা")
-        accumulator.updatePartial("এটটেটাহা পাইসা")
-        accumulator.updatePartial("এটে টাকা পয়সা")
+    fun testPartialResultDoesNotEraseFinalizedText() {
+        // Step 1: Finalize first sentence
+        val firstCommit = accumulator.commitUtterance("আমি আজ ঢাকায় গিয়েছিলাম")
+        assertNotNull(firstCommit)
+        assertEquals("আমি আজ ঢাকায় গিয়েছিলাম", accumulator.fullTranscript)
+        assertEquals(1, accumulator.finalizedSegments.size)
 
-        // fullTranscript must remain empty during active utterance
-        assertEquals("", accumulator.fullTranscript)
-        assertEquals("এটে টাকা পয়সা", accumulator.currentPartial)
+        // Step 2: Interim partial arrives for next sentence
+        accumulator.updateInterim("তারপর বাজারে")
+        assertEquals("তারপর বাজারে", accumulator.currentUtterance)
+        assertEquals("আমি আজ ঢাকায় গিয়েছিলাম", accumulator.fullTranscript) // MUST NOT BE ERASED
 
-        // On utterance boundary, finalize once
-        val committed = accumulator.finalizeUtterance("এটে টাকা পয়সা")
-        assertEquals("এটে টাকা পয়সা", committed)
-        assertEquals("এটে টাকা পয়সা", accumulator.fullTranscript)
-        assertEquals("", accumulator.currentPartial)
-        assertEquals(1, accumulator.utteranceCount)
-
-        // Duplicate finalize call with identical text must not create duplicate entry
-        val duplicateCommit = accumulator.finalizeUtterance("এটে টাকা পয়সা")
-        assertEquals("", duplicateCommit)
-        assertEquals("এটে টাকা পয়সা", accumulator.fullTranscript)
-        assertEquals(1, accumulator.utteranceCount)
+        accumulator.updateInterim("তারপর বাজারে গেলাম")
+        assertEquals("তারপর বাজারে গেলাম", accumulator.currentUtterance)
+        assertEquals("আমি আজ ঢাকায় গিয়েছিলাম", accumulator.fullTranscript) // STILL INTACT
     }
 
     /**
-     * 2. Partial -> Final transition:
-     * Streaming updates evolve currentPartial while fullTranscript is immutable.
-     * On finalization, partial becomes finalized and cleared.
+     * 2. 10 consecutive finalized utterances remain visible in exact sequence
      */
     @Test
-    fun testPartialToFinalTransition() {
-        // Step 1: Speech starts
-        accumulator.updatePartial("আমি")
-        assertEquals("আমি", accumulator.currentPartial)
-        assertEquals("", accumulator.fullTranscript)
-
-        // Step 2: Speech continues
-        accumulator.updatePartial("আমি বাংলায়")
-        assertEquals("আমি বাংলায়", accumulator.currentPartial)
-        assertEquals("", accumulator.fullTranscript)
-
-        // Step 3: Speech finishes
-        accumulator.updatePartial("আমি বাংলায় গান গাই")
-        assertEquals("আমি বাংলায় গান গাই", accumulator.currentPartial)
-        assertEquals("", accumulator.fullTranscript)
-
-        // Step 4: Utterance boundary / silence detected -> Finalize
-        val committed = accumulator.finalizeUtterance("আমি বাংলায় গান গাই")
-        assertEquals("আমি বাংলায় গান গাই", committed)
-        assertEquals("আমি বাংলায় গান গাই", accumulator.fullTranscript)
-        assertEquals("", accumulator.currentPartial)
-    }
-
-    /**
-     * 3. Five consecutive utterances:
-     * Full conversation with 5 separate sentences appended safely in sequence.
-     */
-    @Test
-    fun testFiveConsecutiveUtterances() {
-        val sentences = listOf(
-            "আমার সোনার বাংলা",
-            "আমি তোমায় ভালোবাসি",
-            "চিরদিন তোমার আকাশ",
-            "তোমার বাতাস আমার প্রাণে",
-            "বাজায় বাঁশি"
+    fun testTenConsecutiveFinalizedUtterances() {
+        val utterances = listOf(
+            "আমি আজ ঢাকায় গিয়েছিলাম",
+            "তারপর বাজারে গেলাম",
+            "কিছু ফলমূল কিনেছি",
+            "রিকশায় চড়ে বাড়ি ফিরেছি",
+            "বাড়িতে ফিরে চা খেলাম",
+            "বই পড়তে বসলাম",
+            "কিছুক্ষণ বিশ্রাম নিলাম",
+            "সন্ধ্যায় বন্ধুদের সাথে দেখা হলো",
+            "রাতের খাবার খেলাম",
+            "এবার ঘুমাতে যাচ্ছি"
         )
 
-        for (sentence in sentences) {
-            // Streaming partials
-            val words = sentence.split(" ")
-            var partial = ""
-            for (word in words) {
-                partial = if (partial.isEmpty()) word else "$partial $word"
-                accumulator.updatePartial(partial)
-            }
-            // Utterance boundary
-            val committed = accumulator.finalizeUtterance(sentence)
-            assertEquals(sentence, committed)
+        for ((index, u) in utterances.withIndex()) {
+            // Streaming partials leading up to finalization
+            accumulator.updateInterim(u.substring(0, u.length / 2))
+            val seg = accumulator.commitUtterance(u, utteranceId = (index + 1).toLong())
+            assertNotNull(seg)
         }
 
-        assertEquals(5, accumulator.utteranceCount)
-        val expectedFull = sentences.joinToString("\n")
+        assertEquals(10, accumulator.finalizedSegments.size)
+        assertEquals(10, accumulator.utteranceCount)
+
+        val expectedFull = utterances.joinToString("\n")
         assertEquals(expectedFull, accumulator.fullTranscript)
-        assertEquals("", accumulator.currentPartial)
+        assertEquals("", accumulator.currentUtterance)
     }
 
     /**
-     * 4. Silence between utterances:
-     * Silence chunks arriving between sentences must never clear or corrupt fullTranscript.
+     * 3. Stop commits the final partial exactly once
      */
     @Test
-    fun testSilenceBetweenUtterances() {
-        // Utterance 1
-        accumulator.updatePartial("প্রথম বাক্য")
-        accumulator.finalizeUtterance("প্রথম বাক্য")
-        assertEquals("প্রথম বাক্য", accumulator.fullTranscript)
-
-        // Silence / VAD silence arriving
-        // Empty partials or pure whitespace should not alter fullTranscript
-        accumulator.updatePartial("")
-        accumulator.finalizeUtterance("")
-        assertEquals("প্রথম বাক্য", accumulator.fullTranscript)
-
-        // Utterance 2
-        accumulator.updatePartial("দ্বিতীয় বাক্য")
-        accumulator.finalizeUtterance("দ্বিতীয় বাক্য")
-        val expected = "প্রথম বাক্য\nদ্বিতীয় বাক্য"
-        assertEquals(expected, accumulator.fullTranscript)
-        assertEquals(2, accumulator.utteranceCount)
-    }
-
-    /**
-     * 5. Stopping while partial text exists:
-     * When user stops recording with in-flight unfinalized text,
-     * flushOnStop() commits it safely exactly once and clears partial.
-     */
-    @Test
-    fun testStoppingWhilePartialTextExists() {
-        // Utterance 1 already finalized
-        accumulator.finalizeUtterance("প্রথম বাক্য সম্পন্ন")
+    fun testStopCommitsFinalPartialExactlyOnce() {
+        accumulator.commitUtterance("প্রথম বাক্য সম্পন্ন")
         assertEquals("প্রথম বাক্য সম্পন্ন", accumulator.fullTranscript)
 
-        // User speaks utterance 2 and suddenly clicks STOP
-        accumulator.updatePartial("কাজলবুরর বাংলা ভয়েস টাইপিং")
-        assertEquals("কাজলবুরর বাংলা ভয়েস টাইপিং", accumulator.currentPartial)
+        // User speaks and stops mid-sentence
+        accumulator.updateInterim("কাজলবুরর বাংলা ভয়েস টাইপিং")
+        assertEquals("কাজলবুরর বাংলা ভয়েস টাইপিং", accumulator.currentUtterance)
 
-        // Stop triggered -> flushOnStop()
         val flushed = accumulator.flushOnStop()
-        assertEquals("কাজলবুরর বাংলা ভয়েস টাইপিং", flushed)
-        assertEquals("", accumulator.currentPartial)
+        assertNotNull(flushed)
+        assertEquals("কাজলবুরর বাংলা ভয়েস টাইপিং", flushed?.text)
+        assertEquals("", accumulator.currentUtterance)
 
         val expected = "প্রথম বাক্য সম্পন্ন\nকাজলবুরর বাংলা ভয়েস টাইপিং"
         assertEquals(expected, accumulator.fullTranscript)
 
-        // Second stop or flush should do nothing
+        // Calling flushOnStop again must be a no-op
         val secondFlush = accumulator.flushOnStop()
-        assertEquals("", secondFlush)
+        assertNull(secondFlush)
         assertEquals(expected, accumulator.fullTranscript)
     }
 
     /**
-     * 6. Compose recomposition / State updates:
-     * Verifies SttUiState immutable separation: fullTranscript and currentPartial
-     * are independent fields, and recomposition copies do not wipe fullTranscript.
+     * 4. Repeated VAD callbacks do not duplicate a sentence
      */
     @Test
-    fun testComposeRecompositionStateUpdates() {
-        var state = SttUiState(
-            fullTranscript = "স্থায়ী অনুচ্ছেদ",
-            currentPartial = "নতুন চলমান কথা",
-            liveTranscript = "নতুন চলমান কথা",
-            isRecording = true
-        )
+    fun testRepeatedVadCallbacksDoNotDuplicateSentence() {
+        accumulator.updateInterim("আমি তোমায় ভালোবাসি")
 
-        // Simulate Compose recomposition with new RMS amplitude or frame update
-        state = state.copy(rmsLevel = 0.5f, audioFrameEnd = 16000L)
-        assertEquals("স্থায়ী অনুচ্ছেদ", state.fullTranscript)
-        assertEquals("নতুন চলমান কথা", state.currentPartial)
+        // First VAD pause callback
+        val commit1 = accumulator.commitUtterance("আমি তোমায় ভালোবাসি", utteranceId = 42L)
+        assertNotNull(commit1)
+        assertEquals("আমি তোমায় ভালোবাসি", accumulator.fullTranscript)
+        assertEquals(1, accumulator.finalizedSegments.size)
 
-        // Simulate VAD silence update during active recording
-        state = state.copy(vadState = "SILENCE", rmsLevel = 0.001f)
-        assertEquals("স্থায়ী অনুচ্ছেদ", state.fullTranscript)
+        // Second VAD callback with same utteranceId or same text
+        val commit2 = accumulator.commitUtterance("আমি তোমায় ভালোবাসি", utteranceId = 42L)
+        assertNull(commit2)
+        assertEquals("আমি তোমায় ভালোবাসি", accumulator.fullTranscript)
+        assertEquals(1, accumulator.finalizedSegments.size)
 
-        // Simulate finalization
-        state = state.copy(
-            fullTranscript = "স্থায়ী অনুচ্ছেদ\nনতুন চলমান কথা",
-            currentPartial = "",
-            liveTranscript = "",
-            vadState = "PAUSE_BOUNDARY"
-        )
-        assertEquals("স্থায়ী অনুচ্ছেদ\nনতুন চলমান কথা", state.fullTranscript)
-        assertEquals("", state.currentPartial)
-
-        // Explicit user clear action
-        state = state.copy(fullTranscript = "", currentPartial = "", liveTranscript = "")
-        assertEquals("", state.fullTranscript)
-        assertEquals("", state.currentPartial)
+        // Third VAD callback with empty string
+        val commit3 = accumulator.commitUtterance("", utteranceId = 42L)
+        assertNull(commit3)
+        assertEquals("আমি তোমায় ভালোবাসি", accumulator.fullTranscript)
+        assertEquals(1, accumulator.finalizedSegments.size)
     }
 
     /**
-     * 7. Bengali Normalization & Overlap Removal:
-     * Tests ZWJ/ZWNJ removal, whitespace normalization, and word-overlap stripping.
+     * 5. Identical decoder result cannot be committed twice
      */
     @Test
-    fun testBengaliNormalizationAndOverlap() {
-        // ZWJ and ZWNJ removal
-        val textWithZwj = "বাং\u200Dলা\u200Cদেশ"
-        val normalized = accumulator.normalizeBengali(textWithZwj)
-        assertEquals("বাংলাদেশ", normalized)
+    fun testIdenticalDecoderResultCannotBeCommittedTwice() {
+        val seg1 = accumulator.commitUtterance("চিরদিন তোমার আকাশ")
+        assertNotNull(seg1)
+        assertEquals("চিরদিন তোমার আকাশ", accumulator.fullTranscript)
 
-        // Word overlap removal
-        accumulator.finalizeUtterance("আমি বাংলায় গান গাই")
-        // Candidate starts with suffix "গান গাই" and continues with "প্রতিদিন"
-        val nonOverlapping = accumulator.removeOverlapWithHistory("গান গাই প্রতিদিন সকালে")
-        assertEquals("প্রতিদিন সকালে", nonOverlapping)
+        // Attempt duplicate commit
+        val seg2 = accumulator.commitUtterance("চিরদিন তোমার আকাশ")
+        assertNull(seg2)
+        assertEquals("চিরদিন তোমার আকাশ", accumulator.fullTranscript)
+        assertEquals(1, accumulator.finalizedSegments.size)
+    }
+
+    /**
+     * 6. Overlapping audio chunks do not duplicate words (Suffix/Prefix overlap removal)
+     */
+    @Test
+    fun testOverlappingAudioChunksDoNotDuplicateWords() {
+        val chunk1 = "আমি আজ ঢাকায় গিয়েছিলাম"
+        val chunk2 = "ঢাকায় গিয়েছিলাম তারপর বাজারে গেলাম"
+
+        val seg1 = accumulator.commitUtterance(chunk1)
+        assertNotNull(seg1)
+        assertEquals("আমি আজ ঢাকায় গিয়েছিলাম", accumulator.fullTranscript)
+
+        // Suffix/prefix deduction
+        val nonOverlapping = accumulator.removeSuffixPrefixOverlap(chunk1, chunk2)
+        assertEquals("তারপর বাজারে গেলাম", nonOverlapping)
+
+        val seg2 = accumulator.commitUtterance(chunk2)
+        assertNotNull(seg2)
+        assertEquals("তারপর বাজারে গেলাম", seg2?.text)
+
+        val expected = "আমি আজ ঢাকায় গিয়েছিলাম\nতারপর বাজারে গেলাম"
+        assertEquals(expected, accumulator.fullTranscript)
+    }
+
+    /**
+     * 7. Audio file segmentation & boundary deduplication test
+     */
+    @Test
+    fun testAudioFileSegmentationDeduplication() {
+        val text1 = "আমার সোনার বাংলা আমি তোমায় ভালোবাসি"
+        val text2 = "আমি তোমায় ভালোবাসি চিরদিন তোমার আকাশ"
+
+        val seg1 = accumulator.commitUtterance(text1)
+        assertNotNull(seg1)
+
+        val seg2 = accumulator.commitUtterance(text2)
+        assertNotNull(seg2)
+        assertEquals("চিরদিন তোমার আকাশ", seg2?.text)
+
+        val expected = "আমার সোনার বাংলা আমি তোমায় ভালোবাসি\nচিরদিন তোমার আকাশ"
+        assertEquals(expected, accumulator.fullTranscript)
+    }
+
+    /**
+     * 8. Compose recomposition does not clear or alter transcript
+     */
+    @Test
+    fun testComposeRecompositionDoesNotClearTranscript() {
+        val segmentList = listOf(
+            TranscriptSegment(1L, "আমি আজ ঢাকায় গিয়েছিলাম"),
+            TranscriptSegment(2L, "তারপর বাজারে গেলাম"),
+            TranscriptSegment(3L, "বাড়িতে ফিরে এসেছি")
+        )
+
+        var uiState = SttUiState(
+            finalizedSegments = segmentList,
+            fullTranscript = segmentList.joinToString("\n") { it.text },
+            currentUtterance = "এখন বিশ্রাম নিচ্ছি",
+            interimText = "এখন বিশ্রাম নিচ্ছি",
+            liveTranscript = "এখন বিশ্রাম নিচ্ছি",
+            isRecording = true
+        )
+
+        // Verify initial state
+        val expectedInitial = "আমি আজ ঢাকায় গিয়েছিলাম\nতারপর বাজারে গেলাম\nবাড়িতে ফিরে এসেছি"
+        assertEquals(expectedInitial, uiState.fullTranscript)
+        assertEquals("এখন বিশ্রাম নিচ্ছি", uiState.currentUtterance)
+        assertEquals(3, uiState.finalizedSegments.size)
+
+        // Simulate multiple Compose UI recompositions (e.g. scroll, amplitude change, vad change)
+        uiState = uiState.copy(rmsLevel = 0.85f, audioFrameEnd = 32000L)
+        assertEquals(expectedInitial, uiState.fullTranscript)
+        assertEquals(3, uiState.finalizedSegments.size)
+
+        uiState = uiState.copy(vadState = "SILENCE", rmsLevel = 0.001f)
+        assertEquals(expectedInitial, uiState.fullTranscript)
+        assertEquals(3, uiState.finalizedSegments.size)
+
+        // Verify it NEVER becomes a duplicate repetition
+        val lines = uiState.fullTranscript.split("\n")
+        assertEquals(3, lines.size)
+        assertEquals("আমি আজ ঢাকায় গিয়েছিলাম", lines[0])
+        assertEquals("তারপর বাজারে গেলাম", lines[1])
+        assertEquals("বাড়িতে ফিরে এসেছি", lines[2])
+    }
+
+    /**
+     * 9. Starting a new utterance does not erase previous utterances
+     */
+    @Test
+    fun testStartingNewUtteranceDoesNotErasePrevious() {
+        accumulator.commitUtterance("প্রথম বাক্য")
+        assertEquals("প্রথম বাক্য", accumulator.fullTranscript)
+
+        // Start utterance 2
+        accumulator.updateInterim("দ্বি")
+        assertEquals("প্রথম বাক্য", accumulator.fullTranscript)
+        assertEquals("দ্বি", accumulator.currentUtterance)
+
+        accumulator.updateInterim("দ্বিতীয় বাক্য শুরু")
+        assertEquals("প্রথম বাক্য", accumulator.fullTranscript)
+
+        accumulator.commitUtterance("দ্বিতীয় বাক্য সম্পন্ন")
+        val expected = "প্রথম বাক্য\nদ্বিতীয় বাক্য সম্পন্ন"
+        assertEquals(expected, accumulator.fullTranscript)
+        assertEquals(2, accumulator.finalizedSegments.size)
+    }
+
+    /**
+     * 10. Empty or whitespace decoder results are ignored
+     */
+    @Test
+    fun testEmptyOrWhitespaceDecoderResultsIgnored() {
+        accumulator.commitUtterance("বৈধ বাক্য")
+        assertEquals("বৈধ বাক্য", accumulator.fullTranscript)
+
+        val emptySeg = accumulator.commitUtterance("   \n\t  ")
+        assertNull(emptySeg)
+        assertEquals("বৈধ বাক্য", accumulator.fullTranscript)
+        assertEquals(1, accumulator.finalizedSegments.size)
+    }
+
+    /**
+     * 11. Reported Bangla failure with interim spelling variations:
+     * Intermediate variations ("এটে থাহা", "এটে থাহা পয়সা", "এটটেটাহা পাইসা")
+     * must only update currentUtterance, and finalize ONCE as "এটে টাকা পয়সা".
+     */
+    @Test
+    fun testBanglaInterimSpellingVariationsDoNotDuplicate() {
+        // Stream of noisy interim hypotheses
+        accumulator.updateInterim("এটে থাহা")
+        assertEquals("এটে থাহা", accumulator.currentUtterance)
+        assertEquals("", accumulator.fullTranscript)
+
+        accumulator.updateInterim("এটে থাহা পয়সা")
+        assertEquals("এটে থাহা পয়সা", accumulator.currentUtterance)
+        assertEquals("", accumulator.fullTranscript)
+
+        accumulator.updateInterim("এটটেটাহা পাইসা")
+        assertEquals("এটটেটাহা পাইসা", accumulator.currentUtterance)
+        assertEquals("", accumulator.fullTranscript)
+
+        accumulator.updateInterim("এটে টাকা পয়সা")
+        assertEquals("এটে টাকা পয়সা", accumulator.currentUtterance)
+        assertEquals("", accumulator.fullTranscript)
+
+        // Utterance boundary
+        val committed = accumulator.commitUtterance("এটে টাকা পয়সা", utteranceId = 1L)
+        assertNotNull(committed)
+        assertEquals("এটে টাকা পয়সা", committed?.text)
+        assertEquals("এটে টাকা পয়সা", accumulator.fullTranscript)
+        assertEquals("", accumulator.currentUtterance)
+        assertEquals(1, accumulator.finalizedSegments.size)
+
+        // Duplicate final commit attempt
+        val dup = accumulator.commitUtterance("এটে টাকা পয়সা", utteranceId = 1L)
+        assertNull(dup)
+        assertEquals("এটে টাকা পয়সা", accumulator.fullTranscript)
+        assertEquals(1, accumulator.finalizedSegments.size)
     }
 }
