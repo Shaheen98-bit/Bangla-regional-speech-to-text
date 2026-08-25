@@ -1,5 +1,6 @@
 package com.example.engine
 
+import android.util.Log
 import com.example.tokenizer.SentencePieceTokenizer
 
 /**
@@ -10,10 +11,16 @@ import com.example.tokenizer.SentencePieceTokenizer
 class CtcDecoder(
     var blankIndex: Int = 128
 ) {
+    companion object {
+        private const val TAG = "CtcDecoder"
+    }
+
     data class DecodeResult(
         val text: String,
         val tokenIds: List<Int>,
-        val rawArgmax: IntArray
+        val rawArgmax: IntArray,
+        val collapsedIds: List<Int>,
+        val pieces: List<String>
     )
 
     /**
@@ -30,12 +37,12 @@ class CtcDecoder(
         tokenizer: SentencePieceTokenizer?
     ): DecodeResult {
         if (numFrames <= 0 || numClasses <= 0 || logprobs.size < numFrames * numClasses) {
-            return DecodeResult("", emptyList(), IntArray(0))
+            return DecodeResult("", emptyList(), IntArray(0), emptyList(), emptyList())
         }
 
         val rawArgmax = IntArray(numFrames)
 
-        // 1. Argmax for each timestep
+        // 1. Argmax for each timestep over output classes
         for (t in 0 until numFrames) {
             val frameOffset = t * numClasses
             var maxVal = Float.NEGATIVE_INFINITY
@@ -51,38 +58,73 @@ class CtcDecoder(
             rawArgmax[t] = maxIdx
         }
 
-        // 2. Collapse consecutive duplicate IDs and remove blank
-        val tokenIds = ArrayList<Int>()
+        // 2. CTC collapse: collapse consecutive identical predictions, then filter out blanks
+        val collapsedIds = ArrayList<Int>()
         var prevId = -1
 
         for (t in 0 until numFrames) {
             val currentId = rawArgmax[t]
             if (currentId != prevId) {
-                if (currentId != blankIndex && (blankIndex >= 0)) {
-                    tokenIds.add(currentId)
+                if (currentId != blankIndex) {
+                    collapsedIds.add(currentId)
                 }
                 prevId = currentId
             }
         }
 
-        // 3. SentencePiece decode
-        val decodedText = tokenizer?.decode(tokenIds) ?: ""
+        // 3. Map token IDs to pieces for diagnostics
+        val pieces = ArrayList<String>()
+        if (tokenizer != null) {
+            for (id in collapsedIds) {
+                val piece = tokenizer.getPiece(id) ?: "<id_$id>"
+                pieces.add(piece)
+            }
+        }
+
+        // 4. Decode using SentencePiece
+        val decodedText = tokenizer?.decode(collapsedIds) ?: ""
 
         return DecodeResult(
             text = decodedText,
-            tokenIds = tokenIds,
-            rawArgmax = rawArgmax
+            tokenIds = collapsedIds,
+            rawArgmax = rawArgmax,
+            collapsedIds = collapsedIds,
+            pieces = pieces
         )
+    }
+
+    /**
+     * Diagnostic helper: Takes raw token IDs and prints full diagnostic breakdown.
+     */
+    fun printDiagnostic(
+        rawArgmax: IntArray,
+        collapsedIds: List<Int>,
+        pieces: List<String>,
+        decodedText: String
+    ) {
+        val rawStr = if (rawArgmax.size > 50) {
+            rawArgmax.take(50).joinToString(", ") + "... (total ${rawArgmax.size})"
+        } else {
+            rawArgmax.joinToString(", ")
+        }
+
+        Log.d(TAG, "RAW IDS:\n[$rawStr]")
+        Log.d(TAG, "COLLAPSED IDS:\n$collapsedIds")
+        Log.d(TAG, "TOKENS:\n$pieces")
+        Log.d(TAG, "DECODED:\n\"$decodedText\"")
     }
 
     /**
      * Determines optimal blank index based on tokenizer vocab size and model numClasses.
      */
     fun updateBlankIndexFromVocab(vocabSize: Int, numClasses: Int) {
-        if (numClasses == 129 && vocabSize <= 128) {
-            blankIndex = 128 // Standard NeMo blank index (last token)
-        } else if (blankIndex >= numClasses) {
-            blankIndex = numClasses - 1
+        blankIndex = if (numClasses == vocabSize + 1) {
+            vocabSize // Standard NeMo blank index (last class index, e.g. 128 for 128 vocab)
+        } else if (numClasses == 129 && vocabSize <= 128) {
+            128
+        } else {
+            numClasses - 1
         }
+        Log.i(TAG, "CTC Blank Index configured: $blankIndex (vocabSize=$vocabSize, numClasses=$numClasses)")
     }
 }

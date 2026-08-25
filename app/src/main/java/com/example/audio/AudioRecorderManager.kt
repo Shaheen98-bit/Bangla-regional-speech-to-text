@@ -14,32 +14,35 @@ import kotlin.math.sqrt
 
 /**
  * Manages 16 kHz Mono 16-bit PCM microphone capture using AudioRecord.
- * Maintains a rolling audio window (e.g. 2.5 - 3.0 seconds) and periodically
- * yields audio windows for inference while broadcasting RMS amplitude for UI visuals.
+ * Collects speech utterances and provides real-time audio windows for ASR inference.
  */
 class AudioRecorderManager(
     val sampleRate: Int = 16000,
-    val windowDurationMs: Int = 2500, // 2.5 second rolling window
-    val stepDurationMs: Int = 500     // 0.5 second update step interval
+    val maxUtteranceDurationMs: Int = 12000, // Up to 12s continuous utterance
+    val stepDurationMs: Int = 400            // 400ms update step interval for responsive streaming
 ) {
     companion object {
         private const val TAG = "AudioRecorderManager"
+        private const val SILENCE_RMS_THRESHOLD = 0.003f
+        private const val PAUSE_COMMIT_DURATION_MS = 1400L // 1.4s pause triggers utterance commit
     }
 
     private var audioRecord: AudioRecord? = null
     private var recordingJob: Job? = null
     private var isRecording = false
 
-    val windowSamplesCount: Int = (sampleRate * (windowDurationMs / 1000.0)).toInt() // e.g. 40,000 samples
-    val stepSamplesCount: Int = (sampleRate * (stepDurationMs / 1000.0)).toInt()     // e.g. 8,000 samples
+    private val maxUtteranceSamples: Int = (sampleRate * (maxUtteranceDurationMs / 1000.0)).toInt() // 192,000 samples
+    private val stepSamplesCount: Int = (sampleRate * (stepDurationMs / 1000.0)).toInt()            // 6,400 samples
 
-    // Rolling audio buffer of PCM samples
-    private val rollingBuffer = ShortArray(windowSamplesCount)
-    private var samplesAccumulated = 0
+    // Utterance buffer holding ONLY valid captured PCM samples for the current sentence
+    private val utteranceBuffer = ShortArray(maxUtteranceSamples)
+    private var currentUtteranceSamples = 0
     private var samplesSinceLastEmit = 0
+    private var silentSamplesCount = 0
+    private var speechDetectedInUtterance = false
 
     interface AudioListener {
-        fun onAudioChunkAvailable(audioWindow: ShortArray, totalDurationMs: Long)
+        fun onAudioChunkAvailable(audioWindow: ShortArray, totalDurationMs: Long, isEndOfUtterance: Boolean)
         fun onAmplitudeChanged(rmsNormalized: Float)
         fun onError(message: String)
     }
@@ -104,9 +107,7 @@ class AudioRecorderManager(
 
         audioRecord = record
         isRecording = true
-        samplesAccumulated = 0
-        samplesSinceLastEmit = 0
-        rollingBuffer.fill(0)
+        resetUtteranceState()
 
         recordingJob = coroutineScope.launch(Dispatchers.IO) {
             val readBuffer = ShortArray(1024) // 64ms chunks
@@ -124,8 +125,15 @@ class AudioRecorderManager(
         return true
     }
 
+    private fun resetUtteranceState() {
+        currentUtteranceSamples = 0
+        samplesSinceLastEmit = 0
+        silentSamplesCount = 0
+        speechDetectedInUtterance = false
+    }
+
     private fun processIncomingPcm(samples: ShortArray, count: Int) {
-        // Calculate RMS amplitude for UI visualization
+        // Calculate RMS amplitude for UI visualization & VAD
         var sumSquares = 0.0
         for (i in 0 until count) {
             val s = samples[i].toDouble()
@@ -135,25 +143,58 @@ class AudioRecorderManager(
         val normalizedRms = (rms / 32768.0).toFloat().coerceIn(0f, 1f)
         listener?.onAmplitudeChanged(normalizedRms)
 
-        // Shift and append to rolling buffer
-        if (count >= windowSamplesCount) {
-            System.arraycopy(samples, count - windowSamplesCount, rollingBuffer, 0, windowSamplesCount)
-            samplesAccumulated = windowSamplesCount
+        val isChunkSpeech = normalizedRms >= SILENCE_RMS_THRESHOLD
+
+        if (isChunkSpeech) {
+            speechDetectedInUtterance = true
+            silentSamplesCount = 0
         } else {
-            val shiftAmount = count
-            val keepAmount = windowSamplesCount - shiftAmount
-            System.arraycopy(rollingBuffer, shiftAmount, rollingBuffer, 0, keepAmount)
-            System.arraycopy(samples, 0, rollingBuffer, keepAmount, count)
-            samplesAccumulated = (samplesAccumulated + count).coerceAtMost(windowSamplesCount)
+            silentSamplesCount += count
+        }
+
+        // If we haven't detected speech yet in this utterance and buffer is silent,
+        // keep only the last ~0.3s as lead-in to avoid leading silence buildup
+        if (!speechDetectedInUtterance && currentUtteranceSamples > (sampleRate * 0.3)) {
+            val leadIn = (sampleRate * 0.3).toInt()
+            System.arraycopy(samples, 0, utteranceBuffer, 0, count.coerceAtMost(leadIn))
+            currentUtteranceSamples = count.coerceAtMost(leadIn)
+            return
+        }
+
+        // Append incoming samples to utterance buffer
+        val spaceAvailable = maxUtteranceSamples - currentUtteranceSamples
+        if (spaceAvailable >= count) {
+            System.arraycopy(samples, 0, utteranceBuffer, currentUtteranceSamples, count)
+            currentUtteranceSamples += count
+        } else {
+            // Buffer full: slide left by half to keep recent context
+            val half = maxUtteranceSamples / 2
+            System.arraycopy(utteranceBuffer, half, utteranceBuffer, 0, half)
+            System.arraycopy(samples, 0, utteranceBuffer, half, count.coerceAtMost(maxUtteranceSamples - half))
+            currentUtteranceSamples = half + count.coerceAtMost(maxUtteranceSamples - half)
         }
 
         samplesSinceLastEmit += count
 
-        // When step duration has accumulated and we have enough window data, emit window
-        if (samplesSinceLastEmit >= stepSamplesCount && samplesAccumulated >= (sampleRate * 0.8)) {
-            val windowCopy = rollingBuffer.copyOf()
-            val durationMs = (samplesAccumulated * 1000L) / sampleRate
-            listener?.onAudioChunkAvailable(windowCopy, durationMs)
+        // Check for pause / end-of-sentence condition
+        val pauseDurationMs = (silentSamplesCount * 1000L) / sampleRate
+        val isPauseAfterSpeech = speechDetectedInUtterance && (pauseDurationMs >= PAUSE_COMMIT_DURATION_MS)
+
+        if (isPauseAfterSpeech && currentUtteranceSamples >= (sampleRate * 0.8)) {
+            // Emit final chunk of this utterance with isEndOfUtterance = true
+            val utteranceCopy = utteranceBuffer.copyOfRange(0, currentUtteranceSamples)
+            val durationMs = (currentUtteranceSamples * 1000L) / sampleRate
+            listener?.onAudioChunkAvailable(utteranceCopy, durationMs, isEndOfUtterance = true)
+            resetUtteranceState()
+            return
+        }
+
+        // Periodic streaming emission during active speaking
+        val minSamplesForInference = (sampleRate * 0.4).toInt() // At least 400ms
+        if (samplesSinceLastEmit >= stepSamplesCount && currentUtteranceSamples >= minSamplesForInference) {
+            val utteranceCopy = utteranceBuffer.copyOfRange(0, currentUtteranceSamples)
+            val durationMs = (currentUtteranceSamples * 1000L) / sampleRate
+            listener?.onAudioChunkAvailable(utteranceCopy, durationMs, isEndOfUtterance = false)
             samplesSinceLastEmit = 0
         }
     }
@@ -172,5 +213,6 @@ class AudioRecorderManager(
             audioRecord = null
         }
         listener?.onAmplitudeChanged(0f)
+        resetUtteranceState()
     }
 }

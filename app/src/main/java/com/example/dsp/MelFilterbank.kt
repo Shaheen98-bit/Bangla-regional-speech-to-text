@@ -1,14 +1,13 @@
 package com.example.dsp
 
-import kotlin.math.floor
-import kotlin.math.log10
+import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.pow
 
 /**
  * Generates an 80-channel Mel Filterbank matrix matching NeMo's AudioToMelSpectrogramPreprocessor.
- * NeMo uses standard Slaney/HTK triangular filterbank with n_mels=80, n_fft=512, sample_rate=16000.
+ * NeMo uses librosa.filters.mel(sr=16000, n_fft=512, n_mels=80, fmin=0.0, fmax=8000.0, htk=False, norm='slaney').
  */
 class MelFilterbank(
     val nMels: Int = 80,
@@ -18,20 +17,44 @@ class MelFilterbank(
     val fMax: Float = 8000.0f
 ) {
     val numFreqBins: Int = nFft / 2 + 1 // 257 for 512-FFT
-    // Flattened filterbank weights: shape [nMels, numFreqBins]
+    // Filterbank weights: shape [nMels, numFreqBins]
     val weights: Array<FloatArray> = Array(nMels) { FloatArray(numFreqBins) }
 
     init {
         buildFilterbank()
     }
 
+    /**
+     * Slaney mel scale conversion (htk=False in librosa / NeMo).
+     * Linear below 1000 Hz, logarithmic above 1000 Hz.
+     */
     private fun hzToMel(hz: Float): Float {
-        // Standard HTK / Slaney mel conversion: 2595 * log10(1 + hz / 700)
-        return 2595.0f * log10(1.0f + hz / 700.0f)
+        val fSp = 200.0f / 3.0f // 66.6667 Hz per mel in linear region
+        val minLogHz = 1000.0f
+        val minLogMel = (minLogHz - fMin) / fSp // 15.0 mels
+        val logStep = ln(6.4f) / 27.0f          // ~0.06875
+
+        return if (hz < minLogHz) {
+            (hz - fMin) / fSp
+        } else {
+            minLogMel + ln(hz / minLogHz) / logStep
+        }
     }
 
+    /**
+     * Slaney mel to Hz inverse conversion.
+     */
     private fun melToHz(mel: Float): Float {
-        return 700.0f * (10.0f.pow(mel / 2595.0f) - 1.0f)
+        val fSp = 200.0f / 3.0f
+        val minLogHz = 1000.0f
+        val minLogMel = (minLogHz - fMin) / fSp // 15.0 mels
+        val logStep = ln(6.4f) / 27.0f
+
+        return if (mel < minLogMel) {
+            fMin + fSp * mel
+        } else {
+            minLogHz * exp(logStep * (mel - minLogMel))
+        }
     }
 
     private fun buildFilterbank() {
@@ -47,7 +70,7 @@ class MelFilterbank(
 
         // Convert back to Hz and then to FFT bin indices (fractional)
         val binPoints = FloatArray(nMels + 2)
-        val hzPerBin = sampleRate.toFloat() / nFft.toFloat()
+        val hzPerBin = sampleRate.toFloat() / nFft.toFloat() // 31.25 Hz per bin for 16k/512
         for (i in 0 until nMels + 2) {
             val hz = melToHz(melPoints[i])
             binPoints[i] = hz / hzPerBin
@@ -59,19 +82,19 @@ class MelFilterbank(
             val center = binPoints[m + 1]
             val right = binPoints[m + 2]
 
-            val leftBin = max(0, floor(left).toInt())
+            val leftBin = max(0, kotlin.math.floor(left).toInt())
             val rightBin = min(numFreqBins - 1, kotlin.math.ceil(right).toInt())
 
             for (k in leftBin..rightBin) {
                 val freqBin = k.toFloat()
-                if (freqBin in left..center && center > left) {
+                if (freqBin >= left && freqBin <= center && center > left) {
                     weights[m][k] = (freqBin - left) / (center - left)
-                } else if (freqBin in center..right && right > center) {
+                } else if (freqBin > center && freqBin <= right && right > center) {
                     weights[m][k] = (right - freqBin) / (right - center)
                 }
             }
 
-            // Slaney norm factor: 2.0 / (f_right - f_left) in Hz
+            // Slaney normalization: 2.0 / (f_right - f_left) in Hz
             val hzLeft = melToHz(melPoints[m])
             val hzRight = melToHz(melPoints[m + 2])
             val enorm = if (hzRight > hzLeft) 2.0f / (hzRight - hzLeft) else 1.0f

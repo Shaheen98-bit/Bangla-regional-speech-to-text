@@ -48,12 +48,12 @@ class MelSpectrogramPreprocessor(
         fMax = (sampleRate / 2).toFloat()
     )
 
-    // Precomputed Hann window (symmetric, length 400)
+    // Precomputed Hann window (symmetric, length 400) matching torch.hann_window(400, periodic=False)
     private val hannWindow = FloatArray(windowLength) { i ->
         (0.5 * (1.0 - cos(2.0 * PI * i / (windowLength - 1)))).toFloat()
     }
 
-    // Reusable buffers to avoid GC allocations during streaming inference
+    // Reusable buffers to minimize GC allocations during streaming inference
     private val fftReal = FloatArray(nFft)
     private val fftImag = FloatArray(nFft)
     private val powerSpectrum = FloatArray(numFreqBins)
@@ -62,7 +62,8 @@ class MelSpectrogramPreprocessor(
     data class PreprocessResult(
         val features: FloatArray, // [1, 80, T] flattened as m * T + t
         val numFrames: Int,       // T
-        val nMels: Int = 80
+        val nMels: Int = 80,
+        val isSilence: Boolean = false
     ) {
         /**
          * Converts flattened float array to Direct FloatBuffer suitable for ONNX Runtime tensor.
@@ -78,28 +79,35 @@ class MelSpectrogramPreprocessor(
 
     /**
      * Preprocesses PCM 16-bit short samples into [1, 80, T] mel features.
-     * Normalized per-feature across time.
      */
     fun process(pcmSamples: ShortArray): PreprocessResult {
-        val floatSamples = FloatArray(pcmSamples.size)
-        for (i in pcmSamples.indices) {
-            floatSamples[i] = pcmSamples[i].toFloat() / 32768.0f
+        if (pcmSamples.isEmpty()) {
+            return PreprocessResult(FloatArray(0), 0, nMels, isSilence = true)
         }
-        return process(floatSamples)
+        val floatSamples = FloatArray(pcmSamples.size)
+        var maxAbs = 0f
+        for (i in pcmSamples.indices) {
+            val f = pcmSamples[i].toFloat() / 32768.0f
+            floatSamples[i] = f
+            val absF = kotlin.math.abs(f)
+            if (absF > maxAbs) maxAbs = absF
+        }
+        val isSilence = maxAbs < 0.002f // RMS / Peak is effectively background silence
+        return process(floatSamples, isSilence)
     }
 
     /**
      * Preprocesses normalized float samples [-1.0, 1.0].
      */
-    fun process(samples: FloatArray): PreprocessResult {
+    fun process(samples: FloatArray, isSilence: Boolean = false): PreprocessResult {
         if (samples.size < windowLength) {
-            return PreprocessResult(FloatArray(0), 0, nMels)
+            return PreprocessResult(FloatArray(0), 0, nMels, isSilence = true)
         }
 
         // Calculate number of frames T
         val numFrames = 1 + (samples.size - windowLength) / hopLength
         if (numFrames <= 0) {
-            return PreprocessResult(FloatArray(0), 0, nMels)
+            return PreprocessResult(FloatArray(0), 0, nMels, isSilence = true)
         }
 
         // Temporary storage for log mel spectrogram: [nMels, numFrames]
@@ -174,7 +182,8 @@ class MelSpectrogramPreprocessor(
         return PreprocessResult(
             features = flatOutput,
             numFrames = numFrames,
-            nMels = nMels
+            nMels = nMels,
+            isSilence = isSilence
         )
     }
 }

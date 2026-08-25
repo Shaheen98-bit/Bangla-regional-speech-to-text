@@ -12,13 +12,13 @@ import com.example.engine.OnnxAsrEngine
 import com.example.model.ModelManager
 import com.example.tokenizer.SentencePieceTokenizer
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class SttViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -34,16 +34,15 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
 
     private val audioRecorder = AudioRecorderManager(
         sampleRate = 16000,
-        windowDurationMs = 2500, // 2.5s rolling window
-        stepDurationMs = 500     // 0.5s update interval
+        maxUtteranceDurationMs = 12000,
+        stepDurationMs = 400
     )
 
     private val _uiState = MutableStateFlow(SttUiState())
     val uiState = _uiState.asStateFlow()
 
     private val isInferring = AtomicBoolean(false)
-    private var lastDecodedText = ""
-    private var committedHistory = StringBuilder()
+    private val chunkCounter = AtomicInteger(0)
 
     init {
         checkPersistedFilesAndInitialize()
@@ -109,7 +108,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                         blankIndex = ctcDecoder.blankIndex
                     )
                 }
-                Log.i(TAG, "Tokenizer loaded with vocab size: ${tok.vocabSize}")
+                Log.i(TAG, "Tokenizer loaded successfully. Vocab size: ${tok.vocabSize}, Blank index: ${ctcDecoder.blankIndex}")
                 true
             } else {
                 false
@@ -128,7 +127,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                 val result = onnxEngine.loadModel(file, numThreads = 2)
                 if (result.isSuccess) {
                     _uiState.update { it.copy(isModelLoaded = true) }
-                    Log.i(TAG, "ONNX model loaded successfully.")
+                    Log.i(TAG, "ONNX model loaded successfully from ${file.absolutePath}")
                     true
                 } else {
                     _uiState.update {
@@ -228,8 +227,8 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun setupAudioListener() {
         audioRecorder.setListener(object : AudioRecorderManager.AudioListener {
-            override fun onAudioChunkAvailable(audioWindow: ShortArray, totalDurationMs: Long) {
-                processAudioWindow(audioWindow, totalDurationMs)
+            override fun onAudioChunkAvailable(audioWindow: ShortArray, totalDurationMs: Long, isEndOfUtterance: Boolean) {
+                processAudioWindow(audioWindow, totalDurationMs, isEndOfUtterance)
             }
 
             override fun onAmplitudeChanged(rmsNormalized: Float) {
@@ -256,6 +255,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                 loadTokenizerInternal()
             }
 
+            chunkCounter.set(0)
             val started = audioRecorder.startRecording(viewModelScope)
             withContext(Dispatchers.Main) {
                 _uiState.update { it.copy(isRecording = started) }
@@ -281,12 +281,9 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                 fullTranscript = newFull
             )
         }
-        lastDecodedText = ""
     }
 
     fun clearTranscript() {
-        committedHistory.clear()
-        lastDecodedText = ""
         _uiState.update {
             it.copy(
                 liveTranscript = "",
@@ -295,18 +292,19 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun processAudioWindow(audioWindow: ShortArray, durationMs: Long) {
-        // Conflated execution: If previous inference is still running, skip this chunk
-        // to prevent queuing, memory buildup, and ensure RTF < 1.0
+    private fun processAudioWindow(audioWindow: ShortArray, durationMs: Long, isEndOfUtterance: Boolean) {
+        // Conflated execution: prevent queuing if previous inference is still in progress
         if (!isInferring.compareAndSet(false, true)) {
             return
         }
+
+        val currentChunkNum = chunkCounter.incrementAndGet()
 
         viewModelScope.launch(Dispatchers.Default) {
             val totalStart = System.currentTimeMillis()
 
             try {
-                // 1. NeMo Mel Preprocessing
+                // 1. NeMo Mel Spectrogram Preprocessing (ONLY raw audio PCM is passed)
                 val prepStart = System.currentTimeMillis()
                 val preprocessResult = preprocessor.process(audioWindow)
                 val prepTime = System.currentTimeMillis() - prepStart
@@ -315,7 +313,18 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                // 2. ONNX Inference
+                // If chunk is pure silence (e.g. background room noise before speech), skip model inference
+                if (preprocessResult.isSilence) {
+                    _uiState.update { current ->
+                        current.copy(
+                            audioWindowMs = durationMs,
+                            featureShape = "[1, 80, ${preprocessResult.numFrames}]"
+                        )
+                    }
+                    return@launch
+                }
+
+                // 2. ONNX Inference (ONLY audio features are fed into ONNX model)
                 val inferResult = onnxEngine.runInference(preprocessResult)
                 if (inferResult.isFailure) {
                     val err = inferResult.exceptionOrNull()?.message ?: "Inference error"
@@ -324,7 +333,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val inference = inferResult.getOrThrow()
 
-                // 3. CTC Greedy Decoding
+                // 3. CTC Greedy Decoding via SentencePiece Tokenizer
                 val ctcStart = System.currentTimeMillis()
                 val decodeResult = ctcDecoder.decode(
                     logprobs = inference.logprobs,
@@ -336,20 +345,65 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
 
                 val totalTime = System.currentTimeMillis() - totalStart
                 val rtf = if (durationMs > 0) (totalTime.toFloat() / durationMs.toFloat()) else 0f
-
                 val decodedText = decodeResult.text
 
+                // 4. Detailed STT Debug Logging (Required by specification)
+                val rawStr = if (decodeResult.rawArgmax.size > 20) {
+                    decodeResult.rawArgmax.take(20).joinToString(", ") + "... (${decodeResult.rawArgmax.size} frames)"
+                } else {
+                    decodeResult.rawArgmax.joinToString(", ")
+                }
+
+                Log.d(TAG, """
+--- STT DEBUG ---
+chunk number: $currentChunkNum
+audio samples: ${audioWindow.size} (${durationMs}ms)
+mel shape: [1, ${preprocessResult.nMels}, ${preprocessResult.numFrames}]
+length: ${preprocessResult.numFrames}
+ONNX output shape: [1, ${inference.numFrames}, ${inference.numClasses}]
+argmax IDs: [$rawStr]
+blank ID: ${ctcDecoder.blankIndex}
+collapsed IDs: ${decodeResult.collapsedIds}
+tokenizer pieces: ${decodeResult.pieces}
+decoded text: "$decodedText"
+---------------
+                """.trimIndent())
+
+                // 5. Update UI State
                 _uiState.update { current ->
-                    current.copy(
-                        liveTranscript = decodedText,
-                        audioWindowMs = durationMs,
-                        featureShape = "[1, 80, ${preprocessResult.numFrames}]",
-                        preprocessTimeMs = prepTime,
-                        inferenceTimeMs = inference.inferenceTimeMs,
-                        ctcTimeMs = ctcTime,
-                        totalLatencyMs = totalTime,
-                        rtf = (rtf * 1000).toInt() / 1000f
-                    )
+                    if (isEndOfUtterance) {
+                        // Sentence completed: append to full transcript and clear live
+                        val cleanDecoded = decodedText.trim()
+                        val updatedFull = if (cleanDecoded.isNotEmpty()) {
+                            if (current.fullTranscript.isEmpty()) cleanDecoded
+                            else "${current.fullTranscript}\n$cleanDecoded"
+                        } else {
+                            current.fullTranscript
+                        }
+                        current.copy(
+                            liveTranscript = "",
+                            fullTranscript = updatedFull,
+                            audioWindowMs = durationMs,
+                            featureShape = "[1, 80, ${preprocessResult.numFrames}]",
+                            preprocessTimeMs = prepTime,
+                            inferenceTimeMs = inference.inferenceTimeMs,
+                            ctcTimeMs = ctcTime,
+                            totalLatencyMs = totalTime,
+                            rtf = (rtf * 1000).toInt() / 1000f
+                        )
+                    } else {
+                        // Live updating during speech
+                        current.copy(
+                            liveTranscript = decodedText,
+                            audioWindowMs = durationMs,
+                            featureShape = "[1, 80, ${preprocessResult.numFrames}]",
+                            preprocessTimeMs = prepTime,
+                            inferenceTimeMs = inference.inferenceTimeMs,
+                            ctcTimeMs = ctcTime,
+                            totalLatencyMs = totalTime,
+                            rtf = (rtf * 1000).toInt() / 1000f
+                        )
+                    }
                 }
 
             } catch (e: Exception) {
@@ -391,7 +445,8 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                     try {
                         val tok = SentencePieceTokenizer.fromFile(tokenizerFile)
                         tokenizer = tok
-                        log("Tokenizer loaded successfully. Vocab size = ${tok.vocabSize} pieces", true)
+                        ctcDecoder.updateBlankIndexFromVocab(tok.vocabSize, 129)
+                        log("Tokenizer loaded: ${tok.vocabSize} tokens. CTC Blank ID: ${ctcDecoder.blankIndex}", true)
                     } catch (e: Exception) {
                         log("Failed to parse Tokenizer Protobuf: ${e.message}", false)
                     }
@@ -411,7 +466,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                // Step 3 & 4 & 5: Validate signatures
+                // Step 3: Validate signatures
                 if (onnxEngine.isLoaded) {
                     val metadata = onnxEngine.validateModelMetadata()
                     log("Inputs found: ${metadata.inputNames}", metadata.inputNames.contains("audio_signal"))
@@ -429,7 +484,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                     log("Input length shape: ${metadata.inputShapes["length"]}")
                     log("Output logprobs shape: ${metadata.outputShapes["logprobs"]}")
 
-                    // Step 6: Synthetic 1-second audio end-to-end dry run
+                    // Step 4: Synthetic audio test
                     log("Executing synthetic 1.0s audio test through DSP -> ONNX -> CTC...")
                     val testAudio = ShortArray(16000) { (kotlin.math.sin(it * 0.1) * 5000).toInt().toShort() }
                     val dspRes = preprocessor.process(testAudio)
@@ -441,7 +496,7 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                         log("ONNX inference completed in ${inf.inferenceTimeMs} ms, output shape [1, ${inf.numFrames}, ${inf.numClasses}]", true)
 
                         val ctcRes = ctcDecoder.decode(inf.logprobs, inf.numFrames, inf.numClasses, tokenizer)
-                        log("CTC decoding completed. Decoded test tokens: ${ctcRes.tokenIds.size}", true)
+                        log("CTC decoding completed. Collapsed tokens: ${ctcRes.tokenIds.size}", true)
                     } else {
                         log("ONNX inference dry run failed: ${inferRes.exceptionOrNull()?.message}", false)
                     }
