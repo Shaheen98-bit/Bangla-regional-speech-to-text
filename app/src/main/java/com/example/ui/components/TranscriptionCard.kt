@@ -31,6 +31,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
@@ -38,7 +39,6 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MicOff
-import androidx.compose.material.icons.filled.Notes
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Share
@@ -54,6 +54,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -114,9 +115,18 @@ fun TranscriptionCard(
     val wordCount = if (combinedText.isEmpty()) 0 else combinedText.split(Regex("\\s+")).size
     val charCount = combinedText.length
 
-    val totalHypothesesCount = uiState.liveHypothesisHistory.sumOf { it.hypotheses.size }
+    val totalHypothesesCount = remember(uiState.liveHypothesisHistory) {
+        uiState.liveHypothesisHistory.sumOf { it.hypotheses.size }
+    }
+    val totalChunksCount = uiState.liveHypothesisHistory.size
 
-    // Detect if user has scrolled away from the bottom
+    // Total layout items count calculation (Chunk Header + Hypotheses + Spacer for each group + test hooks)
+    val totalLazyItemsCount = remember(uiState.liveHypothesisHistory) {
+        if (uiState.liveHypothesisHistory.isEmpty()) 0
+        else uiState.liveHypothesisHistory.sumOf { 2 + it.hypotheses.size } + 1
+    }
+
+    // Detect if user is currently near the bottom of the list
     val isAtBottom by remember {
         derivedStateOf {
             val layoutInfo = listState.layoutInfo
@@ -124,26 +134,33 @@ fun TranscriptionCard(
             if (totalItems == 0) true
             else {
                 val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-                lastVisibleIndex >= totalItems - 1
+                // User is considered at bottom if the last visible item is within the last 2 items
+                lastVisibleIndex >= totalItems - 2
             }
         }
     }
 
     var hasNewPendingResults by remember { mutableStateOf(false) }
+    var prevHypothesesCount by remember { mutableIntStateOf(0) }
+    var prevChunksCount by remember { mutableIntStateOf(0) }
 
-    // Auto-scroll to bottom when new text/hypothesis arrives if user is at bottom, else show indicator
-    LaunchedEffect(uiState.liveHypothesisHistory.size, totalHypothesesCount, uiState.liveTranscript) {
-        val totalItems = uiState.liveHypothesisHistory.size
-        if (totalItems > 0) {
+    // Auto-scroll to latest item when new hypothesis/chunk arrives
+    LaunchedEffect(totalHypothesesCount, totalChunksCount) {
+        val hasNewItem = totalHypothesesCount > prevHypothesesCount || totalChunksCount > prevChunksCount
+        if (hasNewItem && totalLazyItemsCount > 0) {
+            val targetIndex = (totalLazyItemsCount - 1).coerceAtLeast(0)
             if (isAtBottom) {
-                listState.animateScrollToItem(totalItems - 1)
+                listState.animateScrollToItem(targetIndex)
                 hasNewPendingResults = false
             } else {
                 hasNewPendingResults = true
             }
         }
+        prevHypothesesCount = totalHypothesesCount
+        prevChunksCount = totalChunksCount
     }
 
+    // Reset pending flag once user reaches the bottom
     LaunchedEffect(isAtBottom) {
         if (isAtBottom) {
             hasNewPendingResults = false
@@ -233,7 +250,7 @@ fun TranscriptionCard(
                                 .testTag("toggle_view_mode_button")
                         ) {
                             Icon(
-                                imageVector = if (viewModeHypothesis) Icons.Default.Layers else Icons.Default.Notes,
+                                imageVector = if (viewModeHypothesis) Icons.Default.Layers else Icons.AutoMirrored.Filled.Notes,
                                 contentDescription = if (viewModeHypothesis) "Hypothesis View" else "Plain Text View",
                                 tint = LavenderPrimary,
                                 modifier = Modifier.size(16.dp)
@@ -372,31 +389,49 @@ fun TranscriptionCard(
                         )
                     }
                 } else if (viewModeHypothesis && uiState.liveHypothesisHistory.isNotEmpty()) {
-                    // Rich Hypothesis Group Cards List
+                    // Rich Hypothesis Group Cards List with stable item keys
                     LazyColumn(
                         state = listState,
                         modifier = Modifier
                             .fillMaxSize()
                             .testTag("hypothesis_history_list"),
                         contentPadding = PaddingValues(vertical = 6.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        itemsIndexed(
-                            items = uiState.liveHypothesisHistory,
-                            key = { _, item -> item.id }
-                        ) { index, group ->
-                            HypothesisChunkCard(
-                                chunkIndex = index + 1,
-                                group = group,
-                                isRecording = uiState.isRecording && !group.isFinalized,
-                                onSelectHypothesis = { selectedText ->
-                                    onSelectHypothesis(group.id, selectedText)
-                                }
-                            )
+                        uiState.liveHypothesisHistory.forEachIndexed { chunkIndex, group ->
+                            val isChunkActive = uiState.isRecording && !group.isFinalized
+
+                            // 1. Chunk Header Item
+                            item(key = "header_${group.id}") {
+                                ChunkHeaderCard(
+                                    chunkIndex = chunkIndex + 1,
+                                    group = group,
+                                    isRecording = isChunkActive
+                                )
+                            }
+
+                            // 2. Individual Hypothesis Items for this Chunk
+                            itemsIndexed(
+                                items = group.hypotheses,
+                                key = { hypIndex, _ -> "${group.id}_hyp_$hypIndex" }
+                            ) { hypIndex, hypText ->
+                                val isSelected = hypText == group.displayText
+                                HypothesisItemCard(
+                                    hypIndex = hypIndex + 1,
+                                    hypText = hypText,
+                                    isSelected = isSelected,
+                                    onSelect = { onSelectHypothesis(group.id, hypText) }
+                                )
+                            }
+
+                            // 3. Spacer/Separator after each chunk
+                            item(key = "spacer_${group.id}") {
+                                Spacer(modifier = Modifier.height(6.dp))
+                            }
                         }
 
                         // Invisible test tag hooks for test runners
-                        item {
+                        item(key = "test_hooks") {
                             Box(modifier = Modifier.size(1.dp)) {
                                 if (uiState.fullTranscript.isNotEmpty()) {
                                     Text(
@@ -427,7 +462,7 @@ fun TranscriptionCard(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         if (uiState.fullTranscript.isNotEmpty()) {
-                            item {
+                            item(key = "plain_full_transcript") {
                                 Text(
                                     text = uiState.fullTranscript,
                                     fontSize = 18.sp,
@@ -439,7 +474,7 @@ fun TranscriptionCard(
                             }
                         }
                         if (uiState.liveTranscript.isNotEmpty()) {
-                            item {
+                            item(key = "plain_live_transcript") {
                                 Text(
                                     text = uiState.liveTranscript + if (uiState.isRecording) " ▍" else "",
                                     fontSize = 18.sp,
@@ -465,7 +500,7 @@ fun TranscriptionCard(
                     FilledTonalButton(
                         onClick = {
                             scope.launch {
-                                val target = (uiState.liveHypothesisHistory.size - 1).coerceAtLeast(0)
+                                val target = (totalLazyItemsCount - 1).coerceAtLeast(0)
                                 listState.animateScrollToItem(target)
                                 hasNewPendingResults = false
                             }
@@ -500,14 +535,13 @@ fun TranscriptionCard(
 }
 
 /**
- * Visual card displaying a single voice chunk and all hypotheses generated during its inference.
+ * Visual header for a single voice chunk group.
  */
 @Composable
-private fun HypothesisChunkCard(
+private fun ChunkHeaderCard(
     chunkIndex: Int,
     group: LiveHypothesisGroup,
     isRecording: Boolean,
-    onSelectHypothesis: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
@@ -521,164 +555,154 @@ private fun HypothesisChunkCard(
             width = if (isRecording) 1.5.dp else 1.dp,
             color = if (isRecording) LavenderPrimary.copy(alpha = 0.7f) else ElegantDarkBorderSubtle
         ),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 6.dp, bottomEnd = 6.dp),
         modifier = modifier
             .fillMaxWidth()
             .testTag("hypothesis_chunk_$chunkIndex")
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            // Chunk Header
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.RecordVoiceOver,
-                        contentDescription = null,
-                        tint = if (isRecording) LavenderPrimary else TextMuted,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Text(
-                        text = "VOICE CHUNK #$chunkIndex",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.5.sp,
-                        color = if (isRecording) LavenderPrimary else TextMuted
-                    )
-                    Text(
-                        text = "• $timeStr",
-                        fontSize = 10.5.sp,
-                        color = TextMuted
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Default.RecordVoiceOver,
+                    contentDescription = null,
+                    tint = if (isRecording) LavenderPrimary else TextMuted,
+                    modifier = Modifier.size(14.dp)
+                )
+                Text(
+                    text = "VOICE CHUNK #$chunkIndex",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.5.sp,
+                    color = if (isRecording) LavenderPrimary else TextMuted
+                )
+                Text(
+                    text = "• $timeStr",
+                    fontSize = 10.5.sp,
+                    color = TextMuted
+                )
+            }
 
-                if (isRecording) {
-                    Surface(
-                        shape = CircleShape,
-                        color = LavenderPrimary.copy(alpha = 0.15f),
-                        modifier = Modifier.height(20.dp)
+            if (isRecording) {
+                Surface(
+                    shape = CircleShape,
+                    color = LavenderPrimary.copy(alpha = 0.15f),
+                    modifier = Modifier.height(20.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 8.dp)
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 8.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(6.dp)
-                                    .background(LavenderPrimary, CircleShape)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "IN-FLIGHT",
-                                fontSize = 9.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = LavenderPrimary
-                            )
-                        }
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .background(LavenderPrimary, CircleShape)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "IN-FLIGHT",
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = LavenderPrimary
+                        )
                     }
-                } else {
-                    Surface(
-                        shape = CircleShape,
-                        color = SuccessGreen.copy(alpha = 0.12f),
-                        modifier = Modifier.height(20.dp)
+                }
+            } else {
+                Surface(
+                    shape = CircleShape,
+                    color = SuccessGreen.copy(alpha = 0.12f),
+                    modifier = Modifier.height(20.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 8.dp)
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 8.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.CheckCircle,
-                                contentDescription = "Finalized",
-                                tint = SuccessGreen,
-                                modifier = Modifier.size(10.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "FINALIZED",
-                                fontSize = 9.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = SuccessGreen
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = "Finalized",
+                            tint = SuccessGreen,
+                            modifier = Modifier.size(10.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "FINALIZED",
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SuccessGreen
+                        )
                     }
                 }
             }
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Hypotheses list
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+/**
+ * Individual hypothesis item card with selectable state and tap interaction.
+ */
+@Composable
+private fun HypothesisItemCard(
+    hypIndex: Int,
+    hypText: String,
+    isSelected: Boolean,
+    onSelect: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = if (isSelected) LavenderContainer.copy(alpha = 0.25f) else ElegantDarkBackground.copy(alpha = 0.7f),
+        border = BorderStroke(
+            width = if (isSelected) 1.dp else 0.5.dp,
+            color = if (isSelected) LavenderPrimary.copy(alpha = 0.8f) else ElegantDarkBorderSubtle
+        ),
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable { onSelect() }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                val hypotheses = group.hypotheses
-                val bestText = group.displayText
+                Text(
+                    text = "$hypIndex.",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (isSelected) LavenderPrimary else TextMuted
+                )
+                Text(
+                    text = hypText,
+                    fontSize = 15.sp,
+                    lineHeight = 22.sp,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (isSelected) TextPrimary else TextSecondary
+                )
+            }
 
-                hypotheses.forEachIndexed { hypIndex, hypText ->
-                    val isSelected = hypText == bestText
-
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = if (isSelected) LavenderContainer.copy(alpha = 0.25f) else ElegantDarkBackground.copy(alpha = 0.6f),
-                        border = BorderStroke(
-                            width = if (isSelected) 1.dp else 0.5.dp,
-                            color = if (isSelected) LavenderPrimary.copy(alpha = 0.8f) else ElegantDarkBorderSubtle
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .clickable {
-                                onSelectHypothesis(hypText)
-                            }
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(
-                                modifier = Modifier.weight(1f),
-                                verticalAlignment = Alignment.Top,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(
-                                    text = "${hypIndex + 1}.",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = if (isSelected) LavenderPrimary else TextMuted
-                                )
-                                Text(
-                                    text = hypText,
-                                    fontSize = 15.sp,
-                                    lineHeight = 22.sp,
-                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                                    color = if (isSelected) TextPrimary else TextSecondary
-                                )
-                            }
-
-                            if (isSelected) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Icon(
-                                    imageVector = Icons.Default.Check,
-                                    contentDescription = "Selected",
-                                    tint = LavenderPrimary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-                    }
-                }
+            if (isSelected) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = "Selected",
+                    tint = LavenderPrimary,
+                    modifier = Modifier.size(16.dp)
+                )
             }
         }
     }
