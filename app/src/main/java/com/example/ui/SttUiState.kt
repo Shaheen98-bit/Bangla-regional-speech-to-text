@@ -5,10 +5,10 @@ import com.example.engine.TranscriptSegment
 /**
  * Immutable UI State representing STT session status, accumulator buffers, and telemetry.
  *
- * Implements the Google Live Transcribe architecture with three distinct buffers:
- * 1. finalizedSegments (committedTranscript / fullTranscript) - Immutable append-only list of finalized sentences.
- * 2. currentUtterance (interimText / liveTranscript) - Active in-flight speech segment only.
- * 3. pendingCommit / commit guard - Deduplication and single-commit logic.
+ * Implements the Unified Google Live Transcribe architecture:
+ * 1. finalTranscript / finalizedSegments - Persistent, immutable append-only history.
+ * 2. liveTranscript / currentUtterance - In-flight partial text for the active utterance only.
+ * 3. displayedTranscript - Clean combination of finalTranscript + liveTranscript.
  */
 data class SttUiState(
     // Model and Tokenizer State
@@ -29,13 +29,16 @@ data class SttUiState(
 
     // Live Transcription Buffers
     val finalizedSegments: List<TranscriptSegment> = emptyList(),
-    val currentUtterance: String = "",
-    val interimText: String = "",
-    val fullTranscript: String = "",
-    val currentPartial: String = "",
+    val finalTranscript: String = "",
     val liveTranscript: String = "",
     val stablePrefix: String = "",
     val lastCommittedText: String = "",
+
+    // Backward compatibility aliases
+    val currentUtterance: String = liveTranscript,
+    val interimText: String = liveTranscript,
+    val fullTranscript: String = finalTranscript,
+    val currentPartial: String = liveTranscript,
 
     // Frame and VAD Telemetry
     val audioFrameStart: Long = 0L,
@@ -81,6 +84,13 @@ data class SttUiState(
     val isBothReady: Boolean
         get() = isModelImported && isTokenizerImported
 
+    val displayedTranscript: String
+        get() = when {
+            finalTranscript.isEmpty() -> liveTranscript
+            liveTranscript.isEmpty() -> finalTranscript
+            else -> "$finalTranscript\n$liveTranscript"
+        }
+
     val committedTranscript: String
-        get() = if (fullTranscript.isNotEmpty()) fullTranscript else finalizedSegments.joinToString("\n") { it.text }
+        get() = if (finalTranscript.isNotEmpty()) finalTranscript else finalizedSegments.joinToString("\n") { it.text }
 }

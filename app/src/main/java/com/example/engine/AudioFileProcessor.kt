@@ -10,7 +10,7 @@ import kotlin.math.sqrt
  * - Whole-stream VAD & speech utterance boundary segmentation
  * - Sample-accurate PCM slicing (never re-processing or re-committing the same speech region)
  * - Acoustic preprocessing & ONNX CTC inference per utterance
- * - Word-level suffix/prefix overlap deduplication
+ * - Unified TranscriptAccumulator for single-source-of-truth accumulation and overlap deduplication
  */
 class AudioFileProcessor(
     private val preprocessor: MelSpectrogramPreprocessor,
@@ -79,7 +79,7 @@ class AudioFileProcessor(
             rawSegments.add(Pair(segStartFrame, numFrames))
         }
 
-        // If no speech detected by threshold, treat whole audio as one or split evenly
+        // If no speech detected by threshold, split evenly into 6-second windows
         if (rawSegments.isEmpty()) {
             val fallbackUtterances = mutableListOf<SpeechUtterance>()
             var cur = 0
@@ -103,7 +103,6 @@ class AudioFileProcessor(
             val silenceSamples = silenceFrames * FRAME_SIZE_SAMPLES
 
             if (silenceSamples < MAX_SILENCE_MERGE_SAMPLES) {
-                // Merge
                 current = Pair(current.first, next.second)
             } else {
                 mergedFrames.add(current)
@@ -123,7 +122,7 @@ class AudioFileProcessor(
             val segLen = endSample - startSample
 
             if (segLen < MIN_UTTERANCE_SAMPLES) {
-                continue // Skip very short blips
+                continue
             }
 
             if (segLen <= MAX_UTTERANCE_SAMPLES) {
@@ -147,19 +146,16 @@ class AudioFileProcessor(
     }
 
     /**
-     * Transcribes an entire decoded audio stream.
+     * Transcribes an entire decoded audio stream using the provided TranscriptAccumulator.
      * Yields progress and returns the list of finalized TranscriptSegments.
      */
     suspend fun transcribeAudio(
         samples: ShortArray,
         tokenizer: SentencePieceTokenizer?,
+        accumulator: TranscriptAccumulator = TranscriptAccumulator(),
         onProgress: (progress: Float, currentSegment: TranscriptSegment?, fullText: String) -> Unit
     ): List<TranscriptSegment> {
         val utterances = segmentUtterances(samples)
-        val finalizedSegments = mutableListOf<TranscriptSegment>()
-        val accumulator = StreamingTranscriptAccumulator()
-
-        var segmentId = 1L
         val totalUtterances = utterances.size
 
         for ((index, utterance) in utterances.withIndex()) {
@@ -179,34 +175,33 @@ class AudioFileProcessor(
                         numClasses = inf.numClasses,
                         tokenizer = tokenizer
                     )
-                    recognizedText = accumulator.normalizeBengali(decodeResult.text)
+                    recognizedText = decodeResult.text
                 }
             }
 
             utterance.committed = true
 
-            // Overlap deduplication against previous segment
-            val previousText = finalizedSegments.lastOrNull()?.text ?: ""
-            val cleanText = accumulator.removeSuffixPrefixOverlap(previousText, recognizedText)
-
-            var newSegment: TranscriptSegment? = null
-            if (cleanText.isNotEmpty()) {
-                newSegment = TranscriptSegment(
-                    id = segmentId++,
-                    text = cleanText,
-                    startMs = utterance.startMs,
-                    endMs = utterance.endMs,
-                    finalized = true
-                )
-                finalizedSegments.add(newSegment)
+            // Set interim text then commit utterance to the unified accumulator
+            if (recognizedText.isNotBlank()) {
+                accumulator.updateLive(recognizedText)
             }
 
-            val currentFullText = finalizedSegments.joinToString("\n") { it.text }
+            val committedSegment = accumulator.commitFinal(
+                rawText = recognizedText,
+                utteranceId = utterance.utteranceId,
+                startMs = utterance.startMs,
+                endMs = utterance.endMs
+            )
+
+            val currentFullText = accumulator.finalTranscript
             val progress = 0.5f + (((index + 1).toFloat() / totalUtterances.toFloat()) * 0.5f)
 
-            onProgress(progress.coerceIn(0.5f, 1.0f), newSegment, currentFullText)
+            onProgress(progress.coerceIn(0.5f, 1.0f), committedSegment, currentFullText)
         }
 
-        return finalizedSegments
+        // Flush any remaining live partial text at the end of the file
+        accumulator.flushOnStop()
+
+        return accumulator.finalizedSegments
     }
 }

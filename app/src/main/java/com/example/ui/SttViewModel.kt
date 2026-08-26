@@ -12,7 +12,7 @@ import com.example.dsp.MelSpectrogramPreprocessor
 import com.example.engine.AudioFileProcessor
 import com.example.engine.CtcDecoder
 import com.example.engine.OnnxAsrEngine
-import com.example.engine.StreamingTranscriptAccumulator
+import com.example.engine.TranscriptAccumulator
 import com.example.model.ModelManager
 import com.example.tokenizer.SentencePieceTokenizer
 import kotlinx.coroutines.Dispatchers
@@ -37,11 +37,15 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     private val ctcDecoder = CtcDecoder(blankIndex = 128)
     private var tokenizer: SentencePieceTokenizer? = null
 
-    // Audio File Processor using whole-stream VAD & overlap deduplication
-    private val audioFileProcessor = AudioFileProcessor(preprocessor, onnxEngine, ctcDecoder)
+    // Unified Transcript Accumulators (Single Source of Truth)
+    val transcriptAccumulator = TranscriptAccumulator()
+    val fileAccumulator = TranscriptAccumulator()
 
-    // Streaming Accumulator for Live Speech (Google Live Transcribe architecture)
-    val accumulator = StreamingTranscriptAccumulator()
+    // Backward-compatible alias
+    val accumulator: TranscriptAccumulator get() = transcriptAccumulator
+
+    // Audio File Processor using whole-stream VAD & unified TranscriptAccumulator
+    private val audioFileProcessor = AudioFileProcessor(preprocessor, onnxEngine, ctcDecoder)
 
     private val audioRecorder = AudioRecorderManager(
         sampleRate = 16000,
@@ -287,9 +291,6 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update {
                     it.copy(
                         isRecording = started,
-                        currentUtterance = "",
-                        interimText = "",
-                        currentPartial = "",
                         liveTranscript = "",
                         vadState = AudioRecorderManager.VAD_SILENCE
                     )
@@ -300,9 +301,11 @@ class SttViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopRecording() {
+        // 1. Stop audio capture
         audioRecorder.stopRecording()
-        // Flush remaining in-flight speech safely to finalizedSegments
-        val flushedSegment = accumulator.flushOnStop()
+
+        // 2. Commit any remaining live partial text exactly once
+        val flushedSegment = transcriptAccumulator.flushOnStop()
 
         if (flushedSegment != null) {
             Log.i(TAG, """
@@ -313,20 +316,18 @@ VAD state: RECORDING_STOP_FLUSH
 decoded text: "${flushedSegment.text}"
 stable prefix: ""
 committed text: "${flushedSegment.text}"
-fullTranscript length: ${accumulator.fullTranscript.length}
+finalTranscript length: ${transcriptAccumulator.finalTranscript.length}
 ------------------------
             """.trimIndent())
         }
 
+        // 3. Update UI state without ever clearing finalTranscript
         _uiState.update { current ->
             current.copy(
                 isRecording = false,
                 rmsLevel = 0f,
-                finalizedSegments = accumulator.finalizedSegments,
-                fullTranscript = accumulator.fullTranscript,
-                currentUtterance = "",
-                interimText = "",
-                currentPartial = "",
+                finalizedSegments = transcriptAccumulator.finalizedSegments,
+                finalTranscript = transcriptAccumulator.finalTranscript,
                 liveTranscript = "",
                 stablePrefix = "",
                 lastCommittedText = flushedSegment?.text ?: current.lastCommittedText,
@@ -335,15 +336,15 @@ fullTranscript length: ${accumulator.fullTranscript.length}
         }
     }
 
+    /**
+     * User explicitly pressed Clear button.
+     */
     fun clearTranscript() {
-        accumulator.clear()
+        transcriptAccumulator.clear()
         _uiState.update {
             it.copy(
                 finalizedSegments = emptyList(),
-                fullTranscript = "",
-                currentUtterance = "",
-                interimText = "",
-                currentPartial = "",
+                finalTranscript = "",
                 liveTranscript = "",
                 stablePrefix = "",
                 lastCommittedText = ""
@@ -351,7 +352,11 @@ fullTranscript length: ${accumulator.fullTranscript.length}
         }
     }
 
+    /**
+     * User explicitly pressed Clear in audio file tab.
+     */
     fun clearFileTranscript() {
+        fileAccumulator.clear()
         _uiState.update {
             it.copy(
                 fileFinalizedSegments = emptyList(),
@@ -392,6 +397,8 @@ fullTranscript length: ${accumulator.fullTranscript.length}
                 Log.w(TAG, "Could not resolve audio file name", e)
             }
 
+            fileAccumulator.clear()
+
             _uiState.update {
                 it.copy(
                     isTranscribingFile = true,
@@ -429,21 +436,23 @@ fullTranscript length: ${accumulator.fullTranscript.length}
                     )
                 }
 
-                // 2. Transcribe using AudioFileProcessor with whole-stream VAD & overlap deduplication
+                // 2. Transcribe using AudioFileProcessor with unified TranscriptAccumulator
                 val finalizedSegments = audioFileProcessor.transcribeAudio(
                     samples = decodedAudio.samples,
-                    tokenizer = tokenizer
+                    tokenizer = tokenizer,
+                    accumulator = fileAccumulator
                 ) { progress, newSeg, fullText ->
                     _uiState.update {
                         it.copy(
                             fileTranscriptionProgress = progress,
                             fileTranscript = fullText,
+                            fileFinalizedSegments = fileAccumulator.finalizedSegments,
                             fileTranscriptionStatus = "প্রসেসিং হচ্ছে... (${(progress * 100).toInt()}%)"
                         )
                     }
                 }
 
-                val finalFullText = finalizedSegments.joinToString("\n") { it.text }
+                val finalFullText = fileAccumulator.finalTranscript
 
                 _uiState.update {
                     it.copy(
@@ -507,7 +516,7 @@ fullTranscript length: ${accumulator.fullTranscript.length}
                     return@launch
                 }
 
-                // If chunk is silence, update telemetry and skip ONNX
+                // If chunk is silence, update telemetry and skip ONNX (never clear finalTranscript)
                 if (preprocessResult.isSilence) {
                     _uiState.update { current ->
                         current.copy(
@@ -545,17 +554,16 @@ fullTranscript length: ${accumulator.fullTranscript.length}
                 val decodedText = decodeResult.text
 
                 if (isEndOfUtterance) {
-                    // Utterance boundary reached: commit only the new/stable sentence once
-                    val committedSegment = accumulator.commitUtterance(
+                    // Utterance boundary reached: commit only the new/stable sentence once to finalTranscript
+                    val committedSegment = transcriptAccumulator.commitFinal(
                         rawText = decodedText,
                         startMs = (audioFrameStart * 1000L) / 16000L,
                         endMs = (audioFrameEnd * 1000L) / 16000L
                     )
                     val committedText = committedSegment?.text ?: ""
-                    val stablePrefix = accumulator.stablePrefix
-                    val fullTranscriptLen = accumulator.fullTranscript.length
+                    val stablePrefix = transcriptAccumulator.stablePrefix
+                    val fullTranscriptLen = transcriptAccumulator.finalTranscript.length
 
-                    // Log detailed required info
                     Log.i(TAG, """
 --- ASR PIPELINE LOG ---
 audioFrameStart: $audioFrameStart
@@ -564,17 +572,14 @@ VAD state: $vadState
 decoded text: "$decodedText"
 stable prefix: "$stablePrefix"
 committed text: "$committedText"
-fullTranscript length: $fullTranscriptLen
+finalTranscript length: $fullTranscriptLen
 ------------------------
                     """.trimIndent())
 
                     _uiState.update { current ->
                         current.copy(
-                            finalizedSegments = accumulator.finalizedSegments,
-                            fullTranscript = accumulator.fullTranscript,
-                            currentUtterance = "",
-                            interimText = "",
-                            currentPartial = "",
+                            finalizedSegments = transcriptAccumulator.finalizedSegments,
+                            finalTranscript = transcriptAccumulator.finalTranscript,
                             liveTranscript = "",
                             stablePrefix = "",
                             lastCommittedText = committedText.ifEmpty { current.lastCommittedText },
@@ -591,12 +596,11 @@ fullTranscript length: $fullTranscriptLen
                         )
                     }
                 } else {
-                    // Intermediate streaming hypothesis: update partial/interim ONLY
-                    val currentPartial = accumulator.updateInterim(decodedText)
-                    val stablePrefix = accumulator.stablePrefix
-                    val fullTranscriptLen = accumulator.fullTranscript.length
+                    // Intermediate streaming hypothesis: updates liveTranscript ONLY (never overwrites finalTranscript)
+                    val currentLive = transcriptAccumulator.updateLive(decodedText)
+                    val stablePrefix = transcriptAccumulator.stablePrefix
+                    val fullTranscriptLen = transcriptAccumulator.finalTranscript.length
 
-                    // Log detailed required info
                     Log.d(TAG, """
 --- ASR PIPELINE LOG ---
 audioFrameStart: $audioFrameStart
@@ -605,18 +609,15 @@ VAD state: $vadState
 decoded text: "$decodedText"
 stable prefix: "$stablePrefix"
 committed text: ""
-fullTranscript length: $fullTranscriptLen
+finalTranscript length: $fullTranscriptLen
 ------------------------
                     """.trimIndent())
 
                     _uiState.update { current ->
                         current.copy(
-                            finalizedSegments = accumulator.finalizedSegments, // Immutable
-                            fullTranscript = accumulator.fullTranscript, // NEVER overwritten or cleared by partial
-                            currentUtterance = currentPartial,
-                            interimText = currentPartial,
-                            currentPartial = currentPartial,
-                            liveTranscript = currentPartial,
+                            finalizedSegments = transcriptAccumulator.finalizedSegments, // Immutable
+                            finalTranscript = transcriptAccumulator.finalTranscript, // NEVER erased or replaced
+                            liveTranscript = currentLive,
                             stablePrefix = stablePrefix,
                             audioFrameStart = audioFrameStart,
                             audioFrameEnd = audioFrameEnd,
