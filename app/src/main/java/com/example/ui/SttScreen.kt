@@ -1,6 +1,10 @@
 package com.example.ui
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -27,19 +31,26 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
@@ -56,7 +67,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -70,10 +83,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.ui.components.AudioFileTranscriptionCard
-import com.example.ui.components.BenchmarkView
 import com.example.ui.components.DiagnosticDialog
 import com.example.ui.components.ImportProgressDialog
-import com.example.ui.components.ModelImportSection
+import com.example.ui.components.ModelConfigDialog
 import com.example.ui.components.TranscriptionCard
 import com.example.ui.components.WaveformView
 import com.example.ui.theme.ElegantDarkBackground
@@ -83,9 +95,14 @@ import com.example.ui.theme.ErrorContainer
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.LavenderPrimary
 import com.example.ui.theme.PurpleDarkCore
+import com.example.ui.theme.SuccessGreen
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -96,6 +113,10 @@ fun SttScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // Dialog & Menu visibility states
+    var showModelConfigDialog by remember { mutableStateOf(false) }
+    var showOptionsMenu by remember { mutableStateOf(false) }
 
     // SAF Picker for Model (.onnx)
     val modelPickerLauncher = rememberLauncherForActivityResult(
@@ -111,7 +132,7 @@ fun SttScreen(
         uri?.let { viewModel.importTokenizer(it) }
     }
 
-    // SAF Picker for Audio File (MP3, WAV, M4A, AAC, OGG, FLAC, MP4, 3GP)
+    // SAF Picker for Audio File
     val audioFilePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -159,57 +180,185 @@ fun SttScreen(
             TopAppBar(
                 title = {
                     Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "বাংলা স্পিচ টু টেক্সট",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp,
+                                letterSpacing = (-0.3).sp,
+                                color = TextPrimary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            if (uiState.isRecording) {
+                                Row(
+                                    modifier = Modifier
+                                        .background(ErrorRed.copy(alpha = 0.2f), CircleShape)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .background(ErrorRed, CircleShape)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "LIVE",
+                                        fontSize = 9.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ErrorRed
+                                    )
+                                }
+                            } else {
+                                Row(
+                                    modifier = Modifier
+                                        .background(LavenderPrimary.copy(alpha = 0.12f), CircleShape)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CloudOff,
+                                        contentDescription = "Offline",
+                                        tint = LavenderPrimary,
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text(
+                                        text = "OFFLINE",
+                                        fontSize = 9.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = LavenderPrimary
+                                    )
+                                }
+                            }
+                        }
                         Text(
-                            text = "বাংলা স্পিচ টু টেক্সট",
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 21.sp,
-                            letterSpacing = (-0.5).sp,
-                            color = TextPrimary
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "Kazalbrur Conformer 120M • 100% Offline",
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.Medium,
+                            text = "Kazalbrur Conformer 120M • 100% On-Device",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Normal,
                             color = TextSecondary
                         )
                     }
                 },
                 actions = {
-                    // Offline badge
-                    Row(
-                        modifier = Modifier
-                            .background(LavenderPrimary.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    // 1. Model & Configuration Modal Button
+                    IconButton(
+                        onClick = { showModelConfigDialog = true },
+                        modifier = Modifier.testTag("model_config_button")
                     ) {
                         Icon(
-                            imageVector = Icons.Default.CloudOff,
-                            contentDescription = "100% Offline",
-                            tint = LavenderPrimary,
-                            modifier = Modifier.size(13.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "OFFLINE",
-                            fontSize = 10.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = LavenderPrimary
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Model Configuration",
+                            tint = if (uiState.isBothReady) LavenderPrimary else ErrorRed
                         )
                     }
 
-                    Spacer(modifier = Modifier.width(4.dp))
+                    // 2. Overflow Menu (Diagnostics, Copy, Share, Save, Clear)
+                    Box {
+                        IconButton(
+                            onClick = { showOptionsMenu = true },
+                            modifier = Modifier.testTag("options_menu_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = "More Options",
+                                tint = TextMuted
+                            )
+                        }
 
-                    // Diagnostic test button
-                    IconButton(
-                        onClick = { viewModel.runDiagnosticTest() },
-                        modifier = Modifier.testTag("diagnostic_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Assessment,
-                            contentDescription = "Run Diagnostics",
-                            tint = TextMuted
-                        )
+                        DropdownMenu(
+                            expanded = showOptionsMenu,
+                            onDismissRequest = { showOptionsMenu = false },
+                            modifier = Modifier.background(ElegantDarkSurfaceCard)
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("মডেল ও কনফিগারেশন", color = TextPrimary, fontSize = 13.sp) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Settings, contentDescription = null, tint = LavenderPrimary, modifier = Modifier.size(18.dp))
+                                },
+                                onClick = {
+                                    showOptionsMenu = false
+                                    showModelConfigDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("ডায়াগনস্টিকস ও মেট্রিক্স", color = TextPrimary, fontSize = 13.sp) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Assessment, contentDescription = null, tint = LavenderPrimary, modifier = Modifier.size(18.dp))
+                                },
+                                onClick = {
+                                    showOptionsMenu = false
+                                    viewModel.runDiagnosticTest()
+                                }
+                            )
+                            HorizontalDivider(color = ElegantDarkBorder)
+                            DropdownMenuItem(
+                                text = { Text("টেক্সট কপি করুন", color = TextPrimary, fontSize = 13.sp) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.ContentCopy, contentDescription = null, tint = LavenderPrimary, modifier = Modifier.size(18.dp))
+                                },
+                                onClick = {
+                                    showOptionsMenu = false
+                                    val text = if (uiState.selectedTab == 0) uiState.displayedTranscript else uiState.fileTranscript
+                                    if (text.isNotEmpty()) {
+                                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                        clipboard.setPrimaryClip(ClipData.newPlainText("Bangla STT", text))
+                                        Toast.makeText(context, "টেক্সট ক্লিপবোর্ডে কপি হয়েছে", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("শেয়ার করুন", color = TextPrimary, fontSize = 13.sp) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Share, contentDescription = null, tint = LavenderPrimary, modifier = Modifier.size(18.dp))
+                                },
+                                onClick = {
+                                    showOptionsMenu = false
+                                    val text = if (uiState.selectedTab == 0) uiState.displayedTranscript else uiState.fileTranscript
+                                    if (text.isNotEmpty()) {
+                                        val sendIntent = Intent().apply {
+                                            action = Intent.ACTION_SEND
+                                            putExtra(Intent.EXTRA_TEXT, text)
+                                            type = "text/plain"
+                                        }
+                                        context.startActivity(Intent.createChooser(sendIntent, "টেক্সট শেয়ার করুন"))
+                                    }
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("ফাইলে সংরক্ষণ করুন", color = TextPrimary, fontSize = 13.sp) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.SaveAlt, contentDescription = null, tint = LavenderPrimary, modifier = Modifier.size(18.dp))
+                                },
+                                onClick = {
+                                    showOptionsMenu = false
+                                    val text = if (uiState.selectedTab == 0) uiState.displayedTranscript else uiState.fileTranscript
+                                    if (text.isNotEmpty()) {
+                                        try {
+                                            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+                                            val fileName = "bangla_stt_$timeStamp.txt"
+                                            val downloadsDir = context.getExternalFilesDir(null) ?: context.filesDir
+                                            val file = File(downloadsDir, fileName)
+                                            file.writeText(text)
+                                            Toast.makeText(context, "সংরক্ষণ করা হয়েছে: ${file.name}", Toast.LENGTH_LONG).show()
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "সংরক্ষণ ব্যর্থ: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }
+                            )
+                            HorizontalDivider(color = ElegantDarkBorder)
+                            DropdownMenuItem(
+                                text = { Text("সব মুছে ফেলুন (Clear)", color = ErrorRed, fontSize = 13.sp) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Delete, contentDescription = null, tint = ErrorRed, modifier = Modifier.size(18.dp))
+                                },
+                                onClick = {
+                                    showOptionsMenu = false
+                                    if (uiState.selectedTab == 0) viewModel.clearTranscript() else viewModel.clearFileTranscript()
+                                }
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -219,7 +368,7 @@ fun SttScreen(
         },
         bottomBar = {
             if (uiState.selectedTab == 0) {
-                // Bottom Live Recording Controls
+                // Compact Bottom Live Recording Controls
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -227,12 +376,12 @@ fun SttScreen(
                             Brush.verticalGradient(
                                 colors = listOf(
                                     Color.Transparent,
-                                    ElegantDarkBackground.copy(alpha = 0.9f),
+                                    ElegantDarkBackground.copy(alpha = 0.95f),
                                     ElegantDarkBackground
                                 )
                             )
                         )
-                        .padding(horizontal = 16.dp, vertical = 14.dp)
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -244,7 +393,7 @@ fun SttScreen(
                             onClick = { viewModel.clearTranscript() },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(46.dp)
+                                .height(44.dp)
                                 .testTag("clear_button"),
                             shape = CircleShape,
                             colors = ButtonDefaults.buttonColors(
@@ -254,19 +403,19 @@ fun SttScreen(
                         ) {
                             Text(
                                 text = "CLEAR",
-                                fontSize = 12.5.sp,
+                                fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium,
                                 letterSpacing = 0.5.sp
                             )
                         }
 
-                        Spacer(modifier = Modifier.width(16.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
 
                         // Center: Large Circular Action Button
                         val isActionEnabled = uiState.isBothReady
                         Box(
                             modifier = Modifier
-                                .size(72.dp)
+                                .size(64.dp)
                                 .scale(if (uiState.isRecording) pulseScale else 1f)
                                 .clip(CircleShape)
                                 .background(
@@ -294,7 +443,7 @@ fun SttScreen(
                             // Inner Dark Circle
                             Box(
                                 modifier = Modifier
-                                    .size(36.dp)
+                                    .size(34.dp)
                                     .clip(CircleShape)
                                     .background(
                                         if (uiState.isRecording) Color(0xFF601410) else PurpleDarkCore
@@ -306,20 +455,20 @@ fun SttScreen(
                                         imageVector = Icons.Default.Stop,
                                         contentDescription = "Stop Recording",
                                         tint = ErrorRed,
-                                        modifier = Modifier.size(17.dp)
+                                        modifier = Modifier.size(16.dp)
                                     )
                                 } else {
                                     Icon(
                                         imageVector = Icons.Default.Mic,
                                         contentDescription = "Start Recording",
                                         tint = LavenderPrimary,
-                                        modifier = Modifier.size(19.dp)
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
                         }
 
-                        Spacer(modifier = Modifier.width(16.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
 
                         // Right: STOP / START Pill Button
                         Button(
@@ -338,7 +487,7 @@ fun SttScreen(
                             enabled = uiState.isBothReady,
                             modifier = Modifier
                                 .weight(1f)
-                                .height(46.dp)
+                                .height(44.dp)
                                 .testTag("secondary_action_button"),
                             shape = CircleShape,
                             colors = ButtonDefaults.buttonColors(
@@ -350,7 +499,7 @@ fun SttScreen(
                         ) {
                             Text(
                                 text = if (uiState.isRecording) "STOP" else "RECORD",
-                                fontSize = 12.5.sp,
+                                fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium,
                                 letterSpacing = 0.5.sp
                             )
@@ -364,32 +513,10 @@ fun SttScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 14.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(horizontal = 14.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            // 1. Compact Collapsed/Expandable Model and Tokenizer Section
-            ModelImportSection(
-                uiState = uiState,
-                onToggleCollapse = { viewModel.toggleConfigCollapsed() },
-                onImportModelClick = {
-                    try {
-                        modelPickerLauncher.launch(arrayOf("*/*"))
-                    } catch (e: Exception) {
-                        viewModel.showUserMessage("Import model unavailable in preview. Please install the APK on a real Android device.")
-                    }
-                },
-                onImportTokenizerClick = {
-                    try {
-                        tokenizerPickerLauncher.launch(arrayOf("*/*"))
-                    } catch (e: Exception) {
-                        viewModel.showUserMessage("Import tokenizer unavailable in preview. Please install the APK on a real Android device.")
-                    }
-                },
-                onRemoveModelClick = { viewModel.removeModel() },
-                onRemoveTokenizerClick = { viewModel.removeTokenizer() }
-            )
-
-            // 2. Navigation Tabs for Live Transcription vs Audio File Transcription
+            // 1. Compact Navigation Tabs for Live Transcription vs Audio File Transcription
             TabRow(
                 selectedTabIndex = uiState.selectedTab,
                 containerColor = ElegantDarkSurfaceCard,
@@ -402,17 +529,17 @@ fun SttScreen(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(14.dp))
+                    .height(38.dp)
+                    .clip(RoundedCornerShape(12.dp))
             ) {
                 Tab(
                     selected = uiState.selectedTab == 0,
                     onClick = { viewModel.setSelectedTab(0) },
                     text = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(imageVector = Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Icon(imageVector = Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(14.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("লাইভ স্পিচ", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+                            Text("লাইভ স্পিচ", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 )
@@ -421,22 +548,22 @@ fun SttScreen(
                     onClick = { viewModel.setSelectedTab(1) },
                     text = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(imageVector = Icons.Default.AudioFile, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Icon(imageVector = Icons.Default.AudioFile, contentDescription = null, modifier = Modifier.size(14.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("অডিও ফাইল", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+                            Text("অডিও ফাইল", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 )
             }
 
-            // 3. Main Fullscreen Tab Content
+            // 2. Main Fullscreen Tab Content (Takes 80%+ of vertical space)
             if (uiState.selectedTab == 0) {
                 // Sleek Waveform Visualizer (compact height when recording)
                 if (uiState.isRecording) {
                     WaveformView(
                         isRecording = uiState.isRecording,
                         rmsLevel = uiState.rmsLevel,
-                        modifier = Modifier.height(28.dp)
+                        modifier = Modifier.height(24.dp)
                     )
                 }
 
@@ -474,14 +601,33 @@ fun SttScreen(
                         .weight(1f)
                 )
             }
-
-            // Compact Benchmark Telemetry only when config is expanded
-            if (!uiState.isConfigCollapsed) {
-                BenchmarkView(uiState = uiState)
-            }
         }
 
-        // Import Streaming Dialog
+        // Model & Tokenizer Configuration Dialog
+        if (showModelConfigDialog) {
+            ModelConfigDialog(
+                uiState = uiState,
+                onDismiss = { showModelConfigDialog = false },
+                onImportModelClick = {
+                    try {
+                        modelPickerLauncher.launch(arrayOf("*/*"))
+                    } catch (e: Exception) {
+                        viewModel.showUserMessage("Import model unavailable in preview. Please install the APK on a real Android device.")
+                    }
+                },
+                onImportTokenizerClick = {
+                    try {
+                        tokenizerPickerLauncher.launch(arrayOf("*/*"))
+                    } catch (e: Exception) {
+                        viewModel.showUserMessage("Import tokenizer unavailable in preview. Please install the APK on a real Android device.")
+                    }
+                },
+                onRemoveModelClick = { viewModel.removeModel() },
+                onRemoveTokenizerClick = { viewModel.removeTokenizer() }
+            )
+        }
+
+        // Import Streaming Progress Dialog
         if (uiState.isImporting) {
             ImportProgressDialog(
                 fileName = uiState.importFileName,
@@ -490,7 +636,7 @@ fun SttScreen(
             )
         }
 
-        // Diagnostic / Test Mode Modal Dialog
+        // Diagnostic / Benchmark Modal Dialog
         if (uiState.showDiagnosticDialog) {
             DiagnosticDialog(
                 uiState = uiState,
