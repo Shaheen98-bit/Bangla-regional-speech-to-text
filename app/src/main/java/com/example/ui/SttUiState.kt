@@ -1,14 +1,17 @@
 package com.example.ui
 
+import com.example.engine.LiveHypothesisGroup
 import com.example.engine.TranscriptSegment
 
 /**
- * Immutable UI State representing STT session status, accumulator buffers, and telemetry.
+ * Immutable UI State representing STT session status, accumulator buffers, hypothesis history, and telemetry.
  *
- * Implements the Unified Google Live Transcribe architecture:
+ * Implements the Unified Google Live Transcribe architecture with Regional Hypothesis History:
  * 1. finalTranscript / finalizedSegments - Persistent, immutable append-only history.
  * 2. liveTranscript / currentUtterance - In-flight partial text for the active utterance only.
- * 3. displayedTranscript - Clean combination of finalTranscript + liveTranscript.
+ * 3. liveHypothesisHistory - Full persistent list of LiveHypothesisGroups retaining all intermediate
+ *    regional dialect hypotheses per voice chunk so they are never silently overwritten or discarded.
+ * 4. displayedTranscript - Clean combination of finalTranscript + liveTranscript.
  */
 data class SttUiState(
     // Model and Tokenizer State
@@ -27,8 +30,9 @@ data class SttUiState(
     val isRecording: Boolean = false,
     val rmsLevel: Float = 0f,
 
-    // Live Transcription Buffers
+    // Live Transcription Buffers & Hypothesis History
     val finalizedSegments: List<TranscriptSegment> = emptyList(),
+    val liveHypothesisHistory: List<LiveHypothesisGroup> = emptyList(),
     val finalTranscript: String = "",
     val liveTranscript: String = "",
     val stablePrefix: String = "",
@@ -83,6 +87,9 @@ data class SttUiState(
 ) {
     val isBothReady: Boolean
         get() = isModelImported && isTokenizerImported
+
+    val hasHypothesisHistory: Boolean
+        get() = liveHypothesisHistory.isNotEmpty()
 
     val displayedTranscript: String
         get() = when {

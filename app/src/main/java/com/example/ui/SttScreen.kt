@@ -364,9 +364,8 @@ fun SttScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .padding(horizontal = 14.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             // 1. Compact Collapsed/Expandable Model and Tokenizer Section
             ModelImportSection(
@@ -403,16 +402,17 @@ fun SttScreen(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(14.dp))
             ) {
                 Tab(
                     selected = uiState.selectedTab == 0,
                     onClick = { viewModel.setSelectedTab(0) },
                     text = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(imageVector = Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(imageVector = Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(15.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("লাইভ স্পিচ", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("লাইভ স্পিচ", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 )
@@ -421,26 +421,33 @@ fun SttScreen(
                     onClick = { viewModel.setSelectedTab(1) },
                     text = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(imageVector = Icons.Default.AudioFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(imageVector = Icons.Default.AudioFile, contentDescription = null, modifier = Modifier.size(15.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("অডিও ফাইল", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("অডিও ফাইল", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 )
             }
 
-            // 3. Tab Content
+            // 3. Main Fullscreen Tab Content
             if (uiState.selectedTab == 0) {
-                // Live Audio Waveform Visualizer
-                WaveformView(
-                    isRecording = uiState.isRecording,
-                    rmsLevel = uiState.rmsLevel
-                )
+                // Sleek Waveform Visualizer (compact height when recording)
+                if (uiState.isRecording) {
+                    WaveformView(
+                        isRecording = uiState.isRecording,
+                        rmsLevel = uiState.rmsLevel,
+                        modifier = Modifier.height(28.dp)
+                    )
+                }
 
-                // Large Live Transcription Display Card with Copy, Share, Save, Clear
+                // Fullscreen Live Transcription Display Card with Hypothesis History & Selection
                 TranscriptionCard(
                     uiState = uiState,
-                    onClearClick = { viewModel.clearTranscript() }
+                    onClearClick = { viewModel.clearTranscript() },
+                    onSelectHypothesis = { groupId, text -> viewModel.selectHypothesis(groupId, text) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
                 )
             } else {
                 // Audio File Transcription Card with File Picker, Progress, Copy, Share, Save, Clear
@@ -461,14 +468,17 @@ fun SttScreen(
                         }
                     },
                     onCancelClick = { viewModel.cancelFileTranscription() },
-                    onClearClick = { viewModel.clearFileTranscript() }
+                    onClearClick = { viewModel.clearFileTranscript() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
                 )
             }
 
-            // Benchmark & Performance Telemetry
-            BenchmarkView(uiState = uiState)
-
-            Spacer(modifier = Modifier.height(16.dp))
+            // Compact Benchmark Telemetry only when config is expanded
+            if (!uiState.isConfigCollapsed) {
+                BenchmarkView(uiState = uiState)
+            }
         }
 
         // Import Streaming Dialog

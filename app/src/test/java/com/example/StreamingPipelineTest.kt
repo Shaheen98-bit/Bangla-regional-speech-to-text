@@ -1,6 +1,6 @@
 package com.example
 
-import com.example.engine.AudioFileProcessor
+import com.example.engine.LiveHypothesisGroup
 import com.example.engine.TranscriptAccumulator
 import com.example.engine.TranscriptSegment
 import com.example.ui.SttUiState
@@ -26,227 +26,181 @@ class StreamingPipelineTest {
     }
 
     /**
-     * Test A: partial → partial → final
-     * Expected: শুধু final text permanent হয়।
+     * Test 1: Single Chunk Hypothesis History Retention
+     * partial A -> partial B -> partial C -> final C
+     * Expected: All 3 hypotheses (A, B, C) are retained in group history, final C is currentBest & finalized.
      */
     @Test
-    fun testA_partialToPartialToFinal_onlyFinalIsPermanent() {
-        // Step 1: partial update 1
-        accumulator.updateLive("আমি আজ")
-        assertEquals("আমি আজ", accumulator.liveTranscript)
-        assertEquals("", accumulator.finalTranscript)
+    fun test1_singleChunk_allHypothesesRetainedInHistory() {
+        // Step 1: partial A
+        accumulator.updateLive("বারিত্তে সব তাহা")
+        // Step 2: partial B
+        accumulator.updateLive("বাড়িতে সব টাকা পয়সা")
+        // Step 3: partial C
+        accumulator.updateLive("বারিত্তে সব তাহা পয়সা নিয়ায়গা")
 
-        // Step 2: partial update 2
-        accumulator.updateLive("আমি আজ ঢাকায়")
-        assertEquals("আমি আজ ঢাকায়", accumulator.liveTranscript)
-        assertEquals("", accumulator.finalTranscript)
+        assertEquals(1, accumulator.liveHypothesisHistory.size)
+        val activeGroup = accumulator.liveHypothesisHistory[0]
+        assertEquals(3, activeGroup.hypotheses.size)
+        assertEquals("বারিত্তে সব তাহা", activeGroup.hypotheses[0])
+        assertEquals("বাড়িতে সব টাকা পয়সা", activeGroup.hypotheses[1])
+        assertEquals("বারিত্তে সব তাহা পয়সা নিয়ায়গা", activeGroup.hypotheses[2])
+        assertEquals(false, activeGroup.isFinalized)
 
-        // Step 3: final commit
-        val commit = accumulator.commitFinal("আমি আজ ঢাকায় গিয়েছিলাম")
+        // Step 4: Final commit
+        val commit = accumulator.commitFinal("বারিত্তে সব তাহা পয়সা নিয়ায়গা")
         assertNotNull(commit)
-        assertEquals("আমি আজ ঢাকায় গিয়েছিলাম", accumulator.finalTranscript)
-        assertEquals("", accumulator.liveTranscript)
-        assertEquals(1, accumulator.finalizedSegments.size)
+
+        assertEquals(1, accumulator.liveHypothesisHistory.size)
+        val finalizedGroup = accumulator.liveHypothesisHistory[0]
+        assertEquals(3, finalizedGroup.hypotheses.size)
+        assertEquals("বারিত্তে সব তাহা পয়সা নিয়ায়গা", finalizedGroup.currentBest)
+        assertEquals(true, finalizedGroup.isFinalized)
+        assertEquals("বারিত্তে সব তাহা পয়সা নিয়ায়গা", accumulator.finalTranscript)
     }
 
     /**
-     * Test B: final → silence → next partial
-     * Expected: প্রথম final text অক্ষত থাকে।
+     * Test 2: Exact Duplicate Callbacks Collapse
+     * A, A, A, B, B, C -> Expected: A, B, C in group history.
      */
     @Test
-    fun testB_finalThenSilenceThenNextPartial_firstFinalRemains() {
-        // Step 1: Commit first final text
-        accumulator.commitFinal("আমি আজ ঢাকায় গিয়েছিলাম")
-        assertEquals("আমি আজ ঢাকায় গিয়েছিলাম", accumulator.finalTranscript)
+    fun test2_duplicateHypothesisCallbacks_collapseDuplicates() {
+        // 3 consecutive identical callbacks of A
+        accumulator.updateLive("বারিত্তে সব তাহা")
+        accumulator.updateLive("বারিত্তে সব তাহা")
+        accumulator.updateLive("বারিত্তে সব তাহা")
 
-        // Step 2: Silence event (never clears finalTranscript)
-        accumulator.updateLive("")
-        assertEquals("আমি আজ ঢাকায় গিয়েছিলাম", accumulator.finalTranscript)
-        assertEquals("", accumulator.liveTranscript)
+        // 2 consecutive identical callbacks of B
+        accumulator.updateLive("বাড়িতে সব টাকা পয়সা")
+        accumulator.updateLive("বাড়িতে সব টাকা পয়সা")
 
-        // Step 3: Next in-progress partial
+        // Callback C
+        accumulator.updateLive("বারিত্তে সব তাহা পয়সা নিয়ায়গা")
+
+        assertEquals(1, accumulator.liveHypothesisHistory.size)
+        val group = accumulator.liveHypothesisHistory[0]
+        assertEquals(3, group.hypotheses.size)
+        assertEquals("বারিত্তে সব তাহা", group.hypotheses[0])
+        assertEquals("বাড়িতে সব টাকা পয়সা", group.hypotheses[1])
+        assertEquals("বারিত্তে সব তাহা পয়সা নিয়ায়গা", group.hypotheses[2])
+    }
+
+    /**
+     * Test 3: Multiple Distinct Chunks Retain Separate Histories
+     * Chunk 1 (A, B, C) and Chunk 2 (D, E)
+     * Expected: 2 distinct groups, all hypotheses preserved across both chunks.
+     */
+    @Test
+    fun test3_multipleChunks_allHypothesisGroupsRetainedSeparately() {
+        // Chunk 1
+        accumulator.updateLive("বারিত্তে সব তাহা")
+        accumulator.updateLive("বাড়িতে সব টাকা পয়সা")
+        accumulator.updateLive("বারিত্তে সব তাহা পয়সা নিয়ায়গা")
+        accumulator.commitFinal("বারিত্তে সব তাহা পয়সা নিয়ায়গা", utteranceId = 1L)
+
+        // Chunk 2
         accumulator.updateLive("তারপর বাজারে")
-        assertEquals("আমি আজ ঢাকায় গিয়েছিলাম", accumulator.finalTranscript)
-        assertEquals("তারপর বাজারে", accumulator.liveTranscript)
-        assertEquals("আমি আজ ঢাকায় গিয়েছিলাম\nতারপর বাজারে", accumulator.displayedTranscript)
+        accumulator.updateLive("তারপর বাজারে ফলমূল কিনতে গেলাম")
+        accumulator.commitFinal("তারপর বাজারে ফলমূল কিনতে গেলাম", utteranceId = 2L)
+
+        assertEquals(2, accumulator.liveHypothesisHistory.size)
+        assertEquals(3, accumulator.liveHypothesisHistory[0].hypotheses.size)
+        assertEquals(2, accumulator.liveHypothesisHistory[1].hypotheses.size)
+        assertEquals(true, accumulator.liveHypothesisHistory[0].isFinalized)
+        assertEquals(true, accumulator.liveHypothesisHistory[1].isFinalized)
+
+        val expectedFinal = "বারিত্তে সব তাহা পয়সা নিয়ায়গা\nতারপর বাজারে ফলমূল কিনতে গেলাম"
+        assertEquals(expectedFinal, accumulator.finalTranscript)
     }
 
     /**
-     * Test C: ৫+ utterance
-     * Expected: সব final sentence ধারাবাহিকভাবে থাকে।
+     * Test 4: Silence Handling
+     * A -> B -> silence event -> Expected: A, B hypotheses remain untouched.
      */
     @Test
-    fun testC_fivePlusUtterances_allFinalSentencesRemain() {
-        val sentences = listOf(
-            "আমি আজ ঢাকায় গিয়েছিলাম",
-            "তারপর বাজারে গেলাম",
-            "কিছু ফলমূল কিনেছি",
-            "রিকশায় চড়ে বাড়ি ফিরেছি",
-            "বাড়িতে ফিরে চা খেলাম",
-            "বই পড়তে বসলাম"
-        )
+    fun test4_silenceEvent_preservesHypothesisHistory() {
+        accumulator.updateLive("আমি আজ")
+        accumulator.updateLive("আমি আজ ঢাকায়")
 
-        for ((idx, s) in sentences.withIndex()) {
-            accumulator.updateLive(s.take(5))
-            val seg = accumulator.commitFinal(s, utteranceId = (idx + 1).toLong())
-            assertNotNull(seg)
-        }
+        // Silence / empty update
+        accumulator.updateLive("")
 
-        assertEquals(6, accumulator.finalizedSegments.size)
-        assertEquals(sentences.joinToString("\n"), accumulator.finalTranscript)
-        assertEquals("", accumulator.liveTranscript)
+        assertEquals(1, accumulator.liveHypothesisHistory.size)
+        assertEquals(2, accumulator.liveHypothesisHistory[0].hypotheses.size)
+        assertEquals("আমি আজ", accumulator.liveHypothesisHistory[0].hypotheses[0])
+        assertEquals("আমি আজ ঢাকায়", accumulator.liveHypothesisHistory[0].hypotheses[1])
     }
 
     /**
-     * Test D: একই final callback দুইবার
-     * Expected: একবারই transcript-এ থাকে (duplicate rejected)।
+     * Test 5: Recording Stop
+     * A -> B -> stop -> Expected: A, B remain, finalized on stop.
      */
     @Test
-    fun testD_sameFinalCallbackTwice_onlyCommittedOnce() {
-        val commit1 = accumulator.commitFinal("বারিত্তে সব তাহা পয়সা নিয়ায়গা", utteranceId = 101L)
-        assertNotNull(commit1)
-        assertEquals("বারিত্তে সব তাহা পয়সা নিয়ায়গা", accumulator.finalTranscript)
-        assertEquals(1, accumulator.finalizedSegments.size)
-
-        // Second duplicate commit with same text & same utterance ID
-        val commit2 = accumulator.commitFinal("বারিত্তে সব তাহা পয়সা নিয়ায়গা", utteranceId = 101L)
-        assertNull(commit2)
-        assertEquals("বারিত্তে সব তাহা পয়সা নিয়ায়গা", accumulator.finalTranscript)
-        assertEquals(1, accumulator.finalizedSegments.size)
-
-        // Third duplicate commit without utterance ID
-        val commit3 = accumulator.commitFinal("বারিত্তে সব তাহা পয়সা নিয়ায়গা", utteranceId = 0L)
-        assertNull(commit3)
-        assertEquals("বারিত্তে সব তাহা পয়সা নিয়ায়গা", accumulator.finalTranscript)
-        assertEquals(1, accumulator.finalizedSegments.size)
-    }
-
-    /**
-     * Test E: recording stop with live partial
-     * Expected: শেষ partial যতটা সম্ভব final হয়ে থাকে।
-     */
-    @Test
-    fun testE_recordingStopWithLivePartial_commitsOnce() {
-        accumulator.commitFinal("প্রথম বাক্য সম্পন্ন")
-        assertEquals("প্রথম বাক্য সম্পন্ন", accumulator.finalTranscript)
-
-        // User speaks and stops mid-sentence
+    fun test5_recordingStop_finalizesActiveHypothesisGroupWithoutLosingHistory() {
+        accumulator.updateLive("কাজলবুরর বাংলা")
         accumulator.updateLive("কাজলবুরর বাংলা ভয়েস টাইপিং")
-        assertEquals("কাজলবুরর বাংলা ভয়েস টাইপিং", accumulator.liveTranscript)
 
         val flushed = accumulator.flushOnStop()
         assertNotNull(flushed)
-        assertEquals("কাজলবুরর বাংলা ভয়েস টাইপিং", flushed?.text)
-        assertEquals("", accumulator.liveTranscript)
 
-        val expected = "প্রথম বাক্য সম্পন্ন\nকাজলবুরর বাংলা ভয়েস টাইপিং"
-        assertEquals(expected, accumulator.finalTranscript)
-
-        // Subsequent flush is no-op
-        val secondFlush = accumulator.flushOnStop()
-        assertNull(secondFlush)
-        assertEquals(expected, accumulator.finalTranscript)
+        assertEquals(1, accumulator.liveHypothesisHistory.size)
+        val group = accumulator.liveHypothesisHistory[0]
+        assertEquals(2, group.hypotheses.size)
+        assertEquals(true, group.isFinalized)
+        assertEquals("কাজলবুরর বাংলা ভয়েস টাইপিং", group.currentBest)
+        assertEquals("কাজলবুরর বাংলা ভয়েস টাইপিং", accumulator.finalTranscript)
     }
 
     /**
-     * Test F: Compose recomposition
-     * Expected: finalTranscript unchanged।
+     * Test 6: Compose Recomposition / UI State Updates
+     * Expected: liveHypothesisHistory in SttUiState is preserved through state changes.
      */
     @Test
-    fun testF_composeRecomposition_finalTranscriptUnchanged() {
-        val segments = listOf(
-            TranscriptSegment(1L, "আমি আজ ঢাকায় গিয়েছিলাম"),
-            TranscriptSegment(2L, "তারপর বাজারে গেলাম")
+    fun test6_composeRecomposition_hypothesisHistoryUnchanged() {
+        val group1 = LiveHypothesisGroup(
+            id = 1L,
+            hypotheses = listOf("বারিত্তে সব তাহা", "বাড়িতে সব টাকা পয়সা"),
+            currentBest = "বাড়িতে সব টাকা পয়সা",
+            isFinalized = true
         )
 
         var uiState = SttUiState(
-            finalizedSegments = segments,
-            finalTranscript = segments.joinToString("\n") { it.text },
-            liveTranscript = "এখন বিশ্রাম নিচ্ছি",
-            isRecording = true
+            liveHypothesisHistory = listOf(group1),
+            finalTranscript = "বাড়িতে সব টাকা পয়সা",
+            liveTranscript = "এখন যাচ্ছি"
         )
 
-        val expected = "আমি আজ ঢাকায় গিয়েছিলাম\nতারপর বাজারে গেলাম"
-        assertEquals(expected, uiState.finalTranscript)
-        assertEquals("এখন বিশ্রাম নিচ্ছি", uiState.liveTranscript)
+        assertEquals(1, uiState.liveHypothesisHistory.size)
+        assertEquals(2, uiState.liveHypothesisHistory[0].hypotheses.size)
 
-        // Recomposition simulation: RMS update, tab change, config collapse
-        uiState = uiState.copy(rmsLevel = 0.95f)
-        assertEquals(expected, uiState.finalTranscript)
-
-        uiState = uiState.copy(isConfigCollapsed = false)
-        assertEquals(expected, uiState.finalTranscript)
+        // Simulate Recompositions: audio level changes, tab change, collapse
+        uiState = uiState.copy(rmsLevel = 0.85f)
+        assertEquals(1, uiState.liveHypothesisHistory.size)
 
         uiState = uiState.copy(selectedTab = 1)
-        assertEquals(expected, uiState.finalTranscript)
+        assertEquals(1, uiState.liveHypothesisHistory.size)
+
+        uiState = uiState.copy(isConfigCollapsed = false)
+        assertEquals(1, uiState.liveHypothesisHistory.size)
     }
 
     /**
-     * Test G: Audio File chunk 1/2/3
-     * Expected: intermediate partial duplicate হয়ে জমে না।
+     * Test 7: User Explicit Clear
+     * Expected: All hypothesis history and transcripts are cleared.
      */
     @Test
-    fun testG_audioFileChunks_intermediatePartialsNotDuplicated() {
-        val fileAccumulator = TranscriptAccumulator()
+    fun test7_userClear_clearsAllHypothesisHistoryAndTranscripts() {
+        accumulator.updateLive("প্রথম হাইপোথিসিস")
+        accumulator.commitFinal("প্রথম হাইপোথিসিস সম্পন্ন")
+        accumulator.updateLive("দ্বিতীয় হাইপোথিসিস")
 
-        // Chunk 1: intermediate partial
-        fileAccumulator.updateLive("এটে থাহা")
-        assertEquals("এটে থাহা", fileAccumulator.liveTranscript)
-        assertEquals("", fileAccumulator.finalTranscript)
-
-        // Chunk 2: updated partial
-        fileAccumulator.updateLive("এটে থাহা পয়সা")
-        assertEquals("এটে থাহা পয়সা", fileAccumulator.liveTranscript)
-        assertEquals("", fileAccumulator.finalTranscript)
-
-        // Chunk 3: updated partial
-        fileAccumulator.updateLive("এটটেটাহা পাইসা")
-        assertEquals("এটটেটাহা পাইসা", fileAccumulator.liveTranscript)
-        assertEquals("", fileAccumulator.finalTranscript)
-
-        // Final utterance recognized: commits once
-        val seg = fileAccumulator.commitFinal("এটে টাকা পয়সা", utteranceId = 1L)
-        assertNotNull(seg)
-        assertEquals("এটে টাকা পয়সা", fileAccumulator.finalTranscript)
-        assertEquals("", fileAccumulator.liveTranscript)
-        assertEquals(1, fileAccumulator.finalizedSegments.size)
-    }
-
-    /**
-     * Test H: Audio File এবং Live একই TranscriptAccumulator ব্যবহার করছে।
-     */
-    @Test
-    fun testH_audioFileAndLiveUseSameTranscriptAccumulatorClass() {
-        val sharedAccumulator = TranscriptAccumulator()
-
-        // 1. Used by Live
-        sharedAccumulator.updateLive("লাইভ কথা")
-        sharedAccumulator.commitFinal("লাইভ কথা সম্পন্ন")
-        assertEquals("লাইভ কথা সম্পন্ন", sharedAccumulator.finalTranscript)
-
-        // 2. Used by Audio File
-        sharedAccumulator.updateLive("ফাইল অডিও")
-        sharedAccumulator.commitFinal("ফাইল অডিও সম্পন্ন")
-        assertEquals("লাইভ কথা সম্পন্ন\nফাইল অডিও সম্পন্ন", sharedAccumulator.finalTranscript)
-        assertEquals(2, sharedAccumulator.finalizedSegments.size)
-    }
-
-    /**
-     * Test I: user Clear
-     * Expected: তখনই transcript empty হয়।
-     */
-    @Test
-    fun testI_userClear_clearsTranscriptCompletely() {
-        accumulator.commitFinal("প্রথম বাক্য")
-        accumulator.commitFinal("দ্বিতীয় বাক্য")
-        accumulator.updateLive("তৃতীয় বাক্য আংশিক")
-
-        assertEquals("প্রথম বাক্য\nদ্বিতীয় বাক্য", accumulator.finalTranscript)
-        assertEquals("তৃতীয় বাক্য আংশিক", accumulator.liveTranscript)
+        assertEquals(2, accumulator.liveHypothesisHistory.size)
+        assertEquals("প্রথম হাইপোথিসিস সম্পন্ন", accumulator.finalTranscript)
 
         // User clicks Clear
         accumulator.clear()
 
+        assertEquals(0, accumulator.liveHypothesisHistory.size)
         assertEquals("", accumulator.finalTranscript)
         assertEquals("", accumulator.liveTranscript)
         assertEquals("", accumulator.displayedTranscript)
@@ -254,19 +208,51 @@ class StreamingPipelineTest {
     }
 
     /**
-     * Test: Overlapping audio chunks deduction
+     * Test 8: Unified TranscriptAccumulator Architecture
+     * Both Live Mode and Audio File Mode work with the same accumulator and models.
      */
     @Test
-    fun testOverlappingSuffixPrefixRemoval() {
-        val chunk1 = "আমি আজ ঢাকায় গিয়েছিলাম"
-        val chunk2 = "ঢাকায় গিয়েছিলাম তারপর বাজারে গেলাম"
+    fun test8_unifiedAccumulatorArchitecture_liveAndFileModeIntegrity() {
+        val liveAcc = TranscriptAccumulator()
+        val fileAcc = TranscriptAccumulator()
 
-        accumulator.commitFinal(chunk1)
-        val seg2 = accumulator.commitFinal(chunk2)
-        assertNotNull(seg2)
-        assertEquals("তারপর বাজারে গেলাম", seg2?.text)
+        // Live transcription
+        liveAcc.updateLive("লাইভ কথা ১")
+        liveAcc.updateLive("লাইভ কথা ২")
+        liveAcc.commitFinal("লাইভ কথা ২ সম্পন্ন")
 
-        val expected = "আমি আজ ঢাকায় গিয়েছিলাম\nতারপর বাজারে গেলাম"
-        assertEquals(expected, accumulator.finalTranscript)
+        assertEquals(1, liveAcc.liveHypothesisHistory.size)
+        assertEquals(3, liveAcc.liveHypothesisHistory[0].hypotheses.size)
+        assertEquals("লাইভ কথা ২ সম্পন্ন", liveAcc.finalTranscript)
+
+        // File transcription
+        fileAcc.updateLive("ফাইল কথা ১")
+        fileAcc.updateLive("ফাইল কথা ২")
+        fileAcc.commitFinal("ফাইল কথা ২ সম্পন্ন")
+
+        assertEquals(1, fileAcc.liveHypothesisHistory.size)
+        assertEquals(3, fileAcc.liveHypothesisHistory[0].hypotheses.size)
+        assertEquals("ফাইল কথা ২ সম্পন্ন", fileAcc.finalTranscript)
+    }
+
+    /**
+     * Test: User selecting alternative hypothesis in group
+     */
+    @Test
+    fun testHypothesisSelection_updatesCurrentBestAndFinalTranscript() {
+        accumulator.updateLive("বারিত্তে সব তাহা পয়সা")
+        accumulator.updateLive("বাড়িতে সব টাকা পয়সা")
+        accumulator.commitFinal("বাড়িতে সব টাকা পয়সা")
+
+        assertEquals(1, accumulator.liveHypothesisHistory.size)
+        assertEquals("বাড়িতে সব টাকা পয়সা", accumulator.liveHypothesisHistory[0].currentBest)
+        assertEquals("বাড়িতে সব টাকা পয়সা", accumulator.finalTranscript)
+
+        // User chooses dialect option "বারিত্তে সব তাহা পয়সা"
+        val groupId = accumulator.liveHypothesisHistory[0].id
+        accumulator.selectHypothesis(groupId, "বারিত্তে সব তাহা পয়সা")
+
+        assertEquals("বারিত্তে সব তাহা পয়সা", accumulator.liveHypothesisHistory[0].currentBest)
+        assertEquals("বারিত্তে সব তাহা পয়সা", accumulator.finalTranscript)
     }
 }

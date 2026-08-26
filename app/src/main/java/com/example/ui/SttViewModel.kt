@@ -327,6 +327,7 @@ finalTranscript length: ${transcriptAccumulator.finalTranscript.length}
                 isRecording = false,
                 rmsLevel = 0f,
                 finalizedSegments = transcriptAccumulator.finalizedSegments,
+                liveHypothesisHistory = transcriptAccumulator.liveHypothesisHistory,
                 finalTranscript = transcriptAccumulator.finalTranscript,
                 liveTranscript = "",
                 stablePrefix = "",
@@ -344,10 +345,25 @@ finalTranscript length: ${transcriptAccumulator.finalTranscript.length}
         _uiState.update {
             it.copy(
                 finalizedSegments = emptyList(),
+                liveHypothesisHistory = emptyList(),
                 finalTranscript = "",
                 liveTranscript = "",
                 stablePrefix = "",
                 lastCommittedText = ""
+            )
+        }
+    }
+
+    /**
+     * User selects a specific hypothesis from the history.
+     */
+    fun selectHypothesis(groupId: Long, selectedText: String) {
+        transcriptAccumulator.selectHypothesis(groupId, selectedText)
+        _uiState.update { current ->
+            current.copy(
+                finalizedSegments = transcriptAccumulator.finalizedSegments,
+                liveHypothesisHistory = transcriptAccumulator.liveHypothesisHistory,
+                finalTranscript = transcriptAccumulator.finalTranscript
             )
         }
     }
@@ -579,6 +595,7 @@ finalTranscript length: $fullTranscriptLen
                     _uiState.update { current ->
                         current.copy(
                             finalizedSegments = transcriptAccumulator.finalizedSegments,
+                            liveHypothesisHistory = transcriptAccumulator.liveHypothesisHistory,
                             finalTranscript = transcriptAccumulator.finalTranscript,
                             liveTranscript = "",
                             stablePrefix = "",
@@ -616,6 +633,7 @@ finalTranscript length: $fullTranscriptLen
                     _uiState.update { current ->
                         current.copy(
                             finalizedSegments = transcriptAccumulator.finalizedSegments, // Immutable
+                            liveHypothesisHistory = transcriptAccumulator.liveHypothesisHistory, // Full history
                             finalTranscript = transcriptAccumulator.finalTranscript, // NEVER erased or replaced
                             liveTranscript = currentLive,
                             stablePrefix = stablePrefix,
