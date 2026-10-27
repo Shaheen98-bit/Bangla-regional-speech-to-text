@@ -1,69 +1,57 @@
-# Kazalbrur Bangla Regional Speech-to-Text (Android)
+নিমপাতা বাংলা ডাবিং | Nimpata Bangla Dubbing
 
-A 100% offline, on-device Android Speech-to-Text (STT) application powered by the **Kazalbrur Conformer CTC** model (ONNX Runtime CPU) and a custom pure-Kotlin **SentencePiece Tokenizer** & **NeMo Mel Spectrogram Preprocessor**.
+নিমপাতা বাংলা ডাবিং (Nimpata Bangla Dubbing) একটি অ্যান্ড্রয়েড ভিডিও প্লেয়ার অ্যাপ। এর সাহায্যে সমর্থিত ইংরেজি সাবটাইটেল বাংলায় অনুবাদ করা এবং বাংলা টেক্সট-টু-স্পিচ ব্যবহার করে ডাবিং অডিও তৈরি করা যায়।
 
----
+📥 অ্যাপ ডাউনলোড
 
-## 🌟 Key Features
+নিমপাতা বাংলা ডাবিং — ভার্সন ১.০.৪৬
 
-- **100% Offline & Private:** Zero cloud dependencies, zero audio sent over the network.
-- **Fast On-Device Inference:** Quantized INT8 Conformer CTC acoustic model running on CPU via Microsoft ONNX Runtime Mobile.
-- **NeMo-Compliant Preprocessing:** Pure Kotlin DSP pipeline (Radix-2 FFT, 80-channel Slaney Mel Filterbank, per-feature normalization).
-- **SentencePiece Decoding:** Custom Protobuf parser and SentencePiece tokenizer with full Bengali Unicode subword mapping and byte fallback.
-- **Robust VAD & Silence Gating:** Voice Activity Detection (RMS thresholding) prevents microphone hiss / room noise from triggering false hallucinations (e.g. "আছে আছে").
-- **Utterance Buffering & Accumulation:** Automatic sentence pause detection and multi-utterance transcript persistence.
-- **Material Design 3 UI:** Modern Jetpack Compose interface with live audio waveform visualization, diagnostic testing dialog, and seamless file import for `.onnx` and `.model` files.
+"⬇️ নিমপাতা বাংলা ডাবিং APK ডাউনলোড করুন" (https://github.com/Shaheen98-bit/Bangla-regional-speech-to-text/releases/download/v1.0.46/app-release.apk)
 
----
+"সব ভার্সন দেখুন" (https://github.com/Shaheen98-bit/Bangla-regional-speech-to-text/releases)
 
-## 🏗️ Architecture
+✨ নিমপাতা বাংলা ডাবিং অ্যাপের ফিচার
 
-```
-Microphone (16 kHz 16-bit Mono PCM)
-        │
-        ▼
-AudioRecorderManager (VAD & Utterance Windowing)
-        │
-        ▼
-MelSpectrogramPreprocessor (Hann Window -> 512 Radix-2 FFT -> 80 Slaney Mel Filterbank -> ln(mel + 1e-5))
-        │
-        ▼
-OnnxAsrEngine (ONNX Runtime Mobile - CPU Session with 2 threads)
-        │ [1, T, 129] Logprobs
-        ▼
-CtcDecoder (Greedy argmax -> Blank filter @ ID 128 -> Consecutive Collapse)
-        │ Token IDs
-        ▼
-SentencePieceTokenizer (tokenizer.model Protobuf Parser -> Bengali Text)
-        │
-        ▼
-SttViewModel & Jetpack Compose UI (Live & Accumulated Transcripts)
-```
+- 🎬 অ্যান্ড্রয়েড ফোনে সমর্থিত ভিডিও চালানো।
+- 🌐 ইংরেজি সাবটাইটেল বাংলায় অনুবাদ করা।
+- 🗣️ বাংলা টেক্সট-টু-স্পিচ দিয়ে ডাবিং অডিও তৈরি করা।
+- 📝 সমর্থিত SRT সাবটাইটেল নিয়ে কাজ করা।
+- 📱 অ্যান্ড্রয়েড ফোনে ভিডিও দেখা ও বাংলা ডাবিংয়ের সুবিধা।
+- 🔄 অ্যাপের ভেতর থেকে নতুন সংস্করণের আপডেট পরীক্ষা করা।
 
----
 
-## 🚀 Building and Running
+ফিচার ব্যবহারের জন্য ভিডিও ফরম্যাট, সাবটাইটেল, বাংলা TTS পরিষেবা এবং প্রয়োজনীয় মডেলের ওপর নির্ভর করতে পারে।
 
-### Prerequisites
-- Android Studio Ladybug / Meerkat or later
-- JDK 17
-- Android SDK 35 / 36
+📖 কীভাবে ব্যবহার করবেন
 
-### Build via Gradle
-```bash
-# Run unit tests
-./gradlew testDebugUnitTest
+১. নিমপাতা বাংলা ডাবিং APK ডাউনলোড করুন।
 
-# Assemble debug APK
-./gradlew assembleDebug
-```
-The output APK will be generated at `app/build/outputs/apk/debug/app-debug.apk`.
+২. অ্যান্ড্রয়েড ফোনে অ্যাপটি ইনস্টল করুন।
+
+৩. সমর্থিত ভিডিও বা সাবটাইটেল ফাইল খুলুন।
+
+৪. উপলভ্য ইংরেজি থেকে বাংলা অনুবাদ ও ডাবিং অপশন ব্যবহার করুন।
+
+৫. অ্যাপের নির্দেশনা অনুসরণ করে ভিডিও চালান অথবা ডাবিং অডিও তৈরি করুন।
+
+🔄 সর্বশেষ সংস্করণ
+
+- অ্যাপের নাম: নিমপাতা বাংলা ডাবিং
+- ইংরেজি নাম: Nimpata Bangla Dubbing
+- ভার্সন: ১.০.৪৬
+- প্ল্যাটফর্ম: Android
+  
+
+🔎 সার্চ কীওয়ার্ড
+
+নিমপাতা বাংলা ডাবিং, নিমপাতা ডাবিং অ্যাপ, বাংলা ডাবিং প্লেয়ার, বাংলা ভিডিও প্লেয়ার, ইংরেজি বাংলা অনুবাদ, ইংরেজি সাবটাইটেল বাংলা, বাংলা সাবটাইটেল অনুবাদ, বাংলা অডিও ডাবিং, অ্যান্ড্রয়েড বাংলা ডাবিং অ্যাপ, Nimpata Bangla Dubbing, Nimpata Bangla Dubbing APK, Nimpata Dubbing Player, Bangla Dubbing Video Player, English to Bangla Subtitle Translator, English to Bengali Translation, Bangla Audio Dubbing App, Bengali Text to Speech, SRT Translator Android.
+
+📌 ডাউনলোড ও আপডেট
+
+নিমপাতা বাংলা ডাবিং (Nimpata Bangla Dubbing)-এর নতুন সংস্করণ পেতে নিচের GitHub Releases পেজ দেখুন।
+
+"নিমপাতা বাংলা ডাবিং — সব রিলিজ ও APK" (https://github.com/Shaheen98-bit/Bangla-regional-speech-to-text/releases)
 
 ---
 
-## 📦 Model & Tokenizer Setup
-
-1. Copy or push your `kazalbrur_int8.onnx` model and `tokenizer.model` file to your Android device.
-2. In the app UI, tap **Import Model** to load `kazalbrur_int8.onnx`.
-3. Tap **Import Tokenizer** to load `tokenizer.model`.
-4. Tap the Microphone button to begin real-time Bengali transcription.
+নিমপাতা বাংলা ডাবিং — ইংরেজি সাবটাইটেল বাংলায় অনুবাদ করুন এবং সমর্থিত বাংলা ডাবিং সুবিধা ব্যবহার করুন।
